@@ -1,0 +1,29 @@
+# ---- 数据产物与源素材（体积大，绝不入库）----
+data/
+video/
+_frames/
+
+# ---- 个人配置与凭据 ----
+config.yaml
+.live_anon_cookies.txt
+bilibili_cookies.txt
+douyin_credentials.yaml
+*_cookies.txt
+*.cookie
+
+# ---- 本机临时调试脚本（含硬编码本地路径）----
+_inspect_tmp*.py
+
+# ---- Python 运行产物 ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ---- 系统/编辑器 ----
+Thumbs.db
+.DS_Store
+desktop.ini
+.idea/
+.vscode/

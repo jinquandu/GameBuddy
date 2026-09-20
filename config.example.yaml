@@ -1,0 +1,89 @@
+# 陪玩助手工具箱配置模板
+# 复制为 config.yaml 后按需修改；未列出的项走代码内默认值。
+
+paths:
+  data_dir: data          # 数据根目录（相对项目根；服务端容器用 TOOLBOX_DATA_DIR
+                           # 环境变量指到挂载点，优先级高于本项）
+
+# ---- 应用端 <-> 服务端（ECS）搬运，接口契约见 docs/SERVER-INTERFACE.md ----
+server:
+  ssh_alias: ecs            # ~/.ssh/config 里的别名（push/pull 走 rsync over ssh）
+  remote_root: /opt/dashijie-eval-data   # 服务端稳定数据根（部署包外，更新不删）
+  container: dashijie-eval  # 服务端跑 toolbox 的容器（push 触发 import/eval 用）
+  site_url: https://95188.pw/eval/
+  keep_sessions: 3          # 服务端 prune 默认保留最近 N 个会话
+
+# ---- B站直播录制（toolbox record）----
+recorder:
+  qn: 10000              # 画质档：10000=原画(1080P)；15000=2K 20000=4K 250=超清。
+                         # 主播推流上限各不同，房间不支持时自动降最高可用档；
+                         # 高画质需登录 cookie（复用 download.cookies_file，
+                         # 缺失时自动用匿名指纹，部分房间画质受限）
+  segment_min: 30        # 单文件时长（分钟），到点自动轮转分片（P 号延续）
+  stall_sec: 20          # 录制中无数据超过该秒数判定断流，自动重拉直链续录
+  poll_sec: 30           # watch 模式下播后轮询间隔（秒）
+
+# ---- B站下载（toolbox download）----
+download:
+  cookies_file: bilibili_cookies.txt   # Netscape 格式 cookie（相对项目根）
+  qn: 80                               # 80=1080P
+
+# ---- 1. 视频生产 ----
+highlight:
+  method: keyword         # keyword = ASR+关键词正则命中
+                           # llm     = 大模型选段（LLM 只挑句段编号+分数+理由，
+                           #            时间戳一律由本地转写句边界对齐，不猜时间）
+  preroll_sec: 0          # 片段起点前留白（落到句首）
+  max_clip_sec: 180       # 单个高光片段最大时长（超长尾部丢整句）
+  merge_gap_sec: 25       # 相邻命中句间隔小于该值合并为同一段
+  keywords_strong: 击倒|击毙|击杀|淘汰|秒了|灭队|团灭|双杀|三杀|四杀|连杀|爆头|补掉
+  keywords_weak: 我操|卧槽|牛逼|漂亮|666|天哪|绝了|冲冲冲
+  # 关键词按主播口癖校准：冷静型主播（如陪玩）常见 折了|一队|杀|没了|好猛|稳的
+
+remix:
+  font_path: ""          # 成片字体；空=自动探测（macOS 系统 Linux Noto Sans CJK）
+  template: fast_cut     # toolbox/templates/ 下的模板名（不带 .yaml）；
+                         # 可用：fast_cut/hot_kills/loot_run/match_story/category_mix/single_best
+
+knockdown:               # 击倒片段链路（python3 -m toolbox knockdowns）
+  pre_sec: 6             # 击倒前留白
+  post_sec: 10           # 击倒后延续
+  merge_sec: 12          # 相邻击倒合并窗口（连杀不切碎）
+
+pickup:                  # 拾取会话链路（python3 -m toolbox pickups / pscore）
+  merge_sec: 25          # 粗簇窗口：仅用于圈定容器界面小扫描的范围
+  look_back: 35          # 岛首事件前小扫描秒数（覆盖开箱-翻看-首拾）
+  look_fwd: 15           # 岛末事件后小扫描秒数
+  max_sec: 90            # 单会话片段封顶秒数（超长整理会话截断）
+  scan_workers: 5        # 岛屿小扫描并行进程数（每进程限 2 线程）
+
+# ---- 2. 发布与反馈 ----
+# 2026-09-15 决策：不做自动发布（openapi 需企业资质；browser 自动化实证被
+# 风控）——改为 remix 的 publish.json 发布包 + 创作者手动上传，详见 douyin.py
+douyin:
+  mode: openapi           # openapi = 官方开放平台（需企业资质）
+                           # browser = 浏览器自动化（已实证被风控，弃用）
+  credentials_file: douyin_credentials.yaml
+  publish_schedule: ""    # 定时发布（如 "2026-09-10 18:00"），留空立即发布
+
+# ---- 3. 数据报告 ----
+stats:
+  method: ocr             # ocr = 结算面板/播报 OCR；cv = 目标检测（未定）
+  game: pubg              # 影响识别的 HUD 布局
+
+# ---- 逐帧行为识别（python3 -m toolbox detect）----
+detector: {}              # 空字典；裸写 `detector:`（子项全注释）会解析成 null
+  # ocr_use_cuda: false   # OCR 走 GPU（默认关）。需 onnxruntime-gpu(CUDA12版)+
+  #                       # CUDA版torch；2026-09-18 RTX3070Ti 同素材实测反而慢
+  #                       # 43%（245s vs 350s），提速请优先用 --workers 并行
+  # dance_keywords: [跳舞, 舞动, 热舞]   # 跳舞 HUD 提示词（待实测校准）
+  # price_table:                        # 高价值物品估价（哈夫币，参考价可覆盖）
+  #   曼德尔砖: 3500000
+  #   红卡: 1200000
+
+# ---- 大模型接入点（后续启用）----
+llm:
+  enabled: false
+  # provider: zhipu
+  # model: glm-4v
+  # api_key_env: LLM_API_KEY
