@@ -1,0 +1,19 @@
+# GPU 档附加依赖（NVIDIA 显卡机器；配合 requirements-client.txt 一起装）
+# 安装：pip install -r requirements-client.txt -r requirements-gpu.txt
+#
+# 收益（2026-09-21 实测，70min 分片，i9-12900H + RTX3070Ti Laptop）：
+#   detect 55min -> 11min（ocr_gpu 批量引擎 + 混部 worker）
+#   ASR 顺带吃 CUDA（funasr 探测到 cuda 自动上 GPU）
+# 代价：torch 从 CPU 版（~0.6GB）换 cu126 版（4.0GB），装机 ~2.0GB -> ~5.5GB
+#
+# 注意（2026-09-21 实证）：
+# - onnxruntime-gpu 1.22 按 CUDA12 编译；CUDA/cuDNN DLL 借道 torch/lib
+#   （ocr_gpu._dll_paths 自动 add_dll_directory），免装 CUDA Toolkit
+# - 不要装 TensorRT：TRT 10.9 + FP16 引擎实测对单帧延迟无改善
+#   （开销在传输/同步而非算力），白占 2.3GB
+# - Mac / 无 N 卡机器不装本文件即可，代码自动回退 CPU 链路
+
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.11.0+cu126
+torchaudio==2.11.0+cu126
+onnxruntime-gpu==1.22.0

@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 契约版本（CONTRACT_VERSION） | 1.0.0 |
+| 契约版本（CONTRACT_VERSION） | 1.1.1 |
 | 初版日期 | 2026-09-20 |
 | 权威源 | 端侧仓库 `docs/SERVER-INTERFACE.md`（服务端仓库同名文件为副本，变更时双端同步） |
 | 端侧实现 | `toolbox/transfer.py`（push/pull/import/sessions） |
@@ -90,7 +90,7 @@ data/remixes/（手动上传发布）
 | `remote_root` | `/opt/dashijie-eval-data` | 服务端稳定数据根（部署包外，更新不删） |
 | `tenant` | `default` | 租户名（多租户方案A） |
 | `container` | `dashijie-eval` | 服务端容器名 |
-| `site_url` | `https://95188.pw/eval/` | 打标站地址（人用，非机器接口） |
+| `site_url` | `http://8.133.251.179/eval/` | 打标站地址（人用，非机器接口；域名失效后统一改公网 IP，IP 变更时同步改此项） |
 | `keep_sessions` | `3` | prune 每租户保留最近 N 个会话 |
 
 ### 2.3 多租户与路径布局
@@ -270,6 +270,7 @@ JSONL，每行一个事件，write-once（文件存在即为完整结论）：
 | kind | 含义 | meta 关键字段 |
 | --- | --- | --- |
 | `match_start` | 进入对局（部署字幕） | — |
+| `loadout` | 入局装备（干员/枪械，围绕 match_start 补扫） | `operator` 干员名、`operator_class` 职业（突击/支援/工程/侦察）、`primary_weapon`/`primary_weapon_type` 主武器与类别、`weapons` 全部稳定读数 [{name,type,reads}]、`weapon_source` hud/tab、`operator_reads` 干员读数投票 |
 | `down` | 击倒（击杀信息流播报） | `target` 目标名、`text` 信息流原文 |
 | `loot` | 拾取（容器计数跳变） | `container` 容器名、`context` 同窗文本、`voice_hint` 语音交叉 |
 | `extract` | 撤离结算 | `profit` 本局收获、`kills_official` 官方击杀数 |
@@ -333,7 +334,7 @@ manifest 的超集：`session`、`imported_at`、`mode`、`video_ready`（bool�
 ```jsonc
 { "session": "<场次名>",
   "matches": [ { "no": 1, "enter": 46032, "dur": 1502.0, "downs": 3,
-                 "loots": 21, "ok": true, "profit": 8926620 } ],   // 逐局口径见 report.py
+                 "loots": 21, "ok": true, "profit": 8926620 } ],   // 逐局口径见 toolbox/chrono.py（2026-09-22 自 report.py 下沉，行为不变）
   "clips": [ {
       "file": "04_P1_07m15s_连拾x3.mp4", "part": "1",
       "t_start": 435.2, "t_end": 441.0,            // 首末拾取时刻（分片内）
@@ -407,4 +408,6 @@ manifest 的超集：`session`、`imported_at`、`mode`、`video_ready`（bool�
 
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
+| 2026-09-21 | 1.1.1 | §2.2 | `site_url` 默认值由 `https://95188.pw/eval/` 改为 `http://8.133.251.179/eval/`（原域名失效，统一改公网 IP；人用地址、非机器接口，勘误级变更，机器通道不受影响） |
+| 2026-09-20 | 1.1.0 | §5.1 | events.jsonl 新增事件类型 `loadout`（入局装备：干员/职业/主武器/枪械类别，围绕 match_start 补扫产出；兼容变更，消费方按未知 kind 忽略即可） |
 | 2026-09-20 | 1.0.0 | 全部 | 初版：从 transfer.py 既有实现（2026-09-17 决策）固化为契约；manifest 新增 `contract_version` 字段（兼容变更，服务端忽略未知字段即可） |

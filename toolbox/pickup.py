@@ -23,7 +23,7 @@ extract）剔——match_start 漏检严重（一字欧 P3/P4/P6/P7 全空但确
 HUD 撤离计时为证），按窗口剔会误杀真对局片段。
 
 索引携带打分要用的：ui 区间、跳变列表、临近击倒（敌盒语境）、对局归属（abs_t/
-match_no，口径同 report.build_matches）。
+match_no，口径同 chrono.build_matches）。
 """
 import json
 import os
@@ -35,15 +35,17 @@ import tempfile
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 
-from toolbox.config import DATA, REPORTS, ROOT, load_config
+from toolbox.chrono import bases_for, build_matches
+from toolbox.config import DATA, ROOT, load_config
 from toolbox.detector import (CONTAINER_RE, PRICE_TABLE, _get_ocr,
                               _video_duration)
-from toolbox.knockdown import (_cut, _existing_events, _mmss, _part_no,
-                               _slug, collect_videos)
-from toolbox.knockdown import events_for as _events_for_kd
-from toolbox.report import _part_base, build_matches
+from toolbox.events import (collect_videos, events_for, events_for_pickup,
+                            part_no)
+from toolbox.knockdown import _cut
+from toolbox.naming import mmss as _mmss, slug as _slug
 
 NEAR_DOWN_SEC = 25.0    # 段首前该窗口内有击倒视为「击杀后舔包/敌人盒」
 # 自己容器列小条（1080p 全帧 OCR 实测标定：口袋/背包/安全箱 计数文字区）
@@ -71,30 +73,6 @@ def _islands(cluster):
     return out
 
 
-def events_for_pickup(video: Path, config, fps=1.0, workers=1):
-    """拾取链路的事件流：已有的该源报告一律复用；没有才现场检测。
-
-    两种复用路径：约定路径 <slug视频名>_full 存在即用——**空文件也是结论**
-    （无对局分片此前已付过整段重扫成本，knockdown 的 MIN_EVENTS_REUSE=20
-    「过稀重扫」保护在这里只会对其再白扫约 1 小时）；否则按 src 匹配任意
-    报告目录（detector 时代旧命名），同样无论多稀都复用。
-    """
-    conv = REPORTS / (_slug(video.stem) + "_full") / "events.jsonl"
-    if conv.exists():
-        lines = [l for l in conv.read_text(encoding="utf-8").splitlines()
-                 if l.strip()]
-        print(f"  {video.name[:36]}：复用报告 {conv.parent.name}"
-              f"（{len(lines)} 条）", flush=True)
-        return [json.loads(l) for l in lines]
-    found = _existing_events(video)
-    if found:
-        rpt, events = found
-        print(f"  {video.name[:36]}：复用事件流 {rpt.parent.name}"
-              f"（{len(events)} 条）", flush=True)
-        return events
-    return _events_for_kd(video, config, fps=fps, workers=workers)
-
-
 def merge_loots(events, merge_sec):
     """loot 事件按时间排序、相邻合并为粗簇（只用于圈定小扫描窗口）。"""
     loots = sorted((e for e in events if e.get("kind") == "loot"),
@@ -112,6 +90,17 @@ def merge_loots(events, merge_sec):
 
 
 # ---------------------------------------------------------------- 界面小扫描
+
+def _batch_engine():
+    """GPU 批量 OCR 引擎（TOOLBOX_OCR_BATCH=1 的 worker 内启用），失败回退 None。"""
+    if not os.environ.get("TOOLBOX_OCR_BATCH"):
+        return None
+    try:
+        from toolbox.detector import _get_batch_ocr
+        return _get_batch_ocr()
+    except Exception:
+        return None
+
 
 def scan_ui_sessions(path, t_lo, t_hi, fps=1.0):
     """[t_lo, t_hi] 内检测容器界面开合：自己容器列小条 OCR。
@@ -141,10 +130,20 @@ def scan_ui_sessions(path, t_lo, t_hi, fps=1.0):
     buf = np.frombuffer(p.stdout, dtype=np.uint8)
     n = len(buf) // (cw * ch * 3)
 
+    # 窄条小字原生分辨率下 det 噪声框多——rec 逐框跑反而更慢且偶漏读；
+    # 2x 放大后 det 候选框少且更准，720p 实测单帧快 30-45%
+    frames = [cv2.resize(buf[i * cw * ch * 3:(i + 1) * cw * ch * 3].reshape(ch, cw, 3),
+                         None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+              for i in range(n)]
+    batch = _batch_engine()       # GPU 批量引擎（worker 里启用）；逐帧兜底
+    if batch is not None:
+        all_res = []
+        for i in range(0, len(frames), batch.det_batch):
+            all_res.extend(batch.run(frames[i:i + batch.det_batch]))
+    else:
+        all_res = [ocr(f, use_cls=False)[0] for f in frames]
     reads = []            # [(t, {容器: n})]
-    for i in range(n):
-        fr = buf[i * cw * ch * 3:(i + 1) * cw * ch * 3].reshape(ch, cw, 3)
-        res, _ = ocr(fr)
+    for i, res in enumerate(all_res):
         counts = {}
         for box, text, score in (res or []):
             if score < 0.5:
@@ -216,23 +215,27 @@ def _lobby_check(video, t0, t1, ocr=None, max_frames=LOBBY_MAX_FRAMES):
     t0 = max(0.0, t0)
     n = max(2, min(max_frames, int(t1 - t0) + 3))
     fps = n / max(t1 - t0, 1.0)
-    p = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error",
-         "-ss", f"{t0:.2f}", "-to", f"{t1:.2f}", "-i", str(video),
-         "-vf", f"fps={fps:.4f}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
-        capture_output=True, check=True)
-    buf = np.frombuffer(p.stdout, dtype=np.uint8)
-    if buf.size == 0:
-        return False
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
                         "-show_entries", "stream=width,height",
                         "-of", "csv=p=0", str(video)],
                        capture_output=True, text=True, check=True)
     w, h = (int(x) for x in r.stdout.strip().split(","))
-    per = w * h * 3
+    # 只解码顶部菜单带（开始游戏/交易行/改枪台实测 cy≈0.05，2026-09-21）：
+    # 整帧 OCR 1280x720 每帧 1-2s，顶部 0-15% 高×70% 宽提速 ~10x
+    cw, ch = int(w * 0.70), int(h * 0.15)
+    p = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-ss", f"{t0:.2f}", "-to", f"{t1:.2f}", "-i", str(video),
+         "-vf", f"fps={fps:.4f},crop={cw}:{ch}:0:0",
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+        capture_output=True, check=True)
+    buf = np.frombuffer(p.stdout, dtype=np.uint8)
+    if buf.size == 0:
+        return False
+    per = cw * ch * 3
     for i in range(len(buf) // per):
-        fr = buf[i * per:(i + 1) * per].reshape(h, w, 3)
-        res, _ = ocr(fr)
+        fr = buf[i * per:(i + 1) * per].reshape(ch, cw, 3)
+        res, _ = ocr(fr, use_cls=False)
         if res and any(LOBBY_MARKERS.search(text)
                        for _, text, score in res if score > 0.5):
             return True
@@ -241,51 +244,133 @@ def _lobby_check(video, t0, t1, ocr=None, max_frames=LOBBY_MAX_FRAMES):
 
 # ---------------------------------------------------------------- 会话组装
 
-def scan_islands_parallel(video, todo, cache, cache_path, scan_fps,
-                          look_back, look_fwd, workers=5):
-    """并行跑缺失岛的小扫描（独立子进程，detector._scan_worker 同套路：
-    多进程 OCR 并行是本机唯一有效加速；每 worker 限 2 线程见 _pickup_scan_worker）。
+# ---------------------------------------------------------------- 批量并行
 
-    todo: [(island, ckey)]；完成即增量落盘 cache（中断重跑只补未扫岛）。
-    worker 失败的岛记空列表——下游自然走原簇兜底，且不反复重试。
-    """
-    todo = [(island, ckey) for island, ckey in todo if ckey not in cache]
-    if not todo:
-        return
-    tmpdir = tempfile.mkdtemp(prefix="pk_scan_")
+def _batch_parallel(worker_module, fixed_args, jobs, n_workers, on_row,
+                    gpu_workers=0):
+    """通用批量并行：jobs 均衡分组 → 每组一个持久 worker 子进程（模型只加载
+    一次，逐任务 flush JSON 行）→ 主进程轮询增量回调 on_row(row)。
+    gpu_workers：前 N 个 worker 走 CUDA（不占 CPU 核，混跑聚合吞吐更高）。
+
+    job 为 JSON 可序列化 dict，须含 "key" 与 "cost"（时长秒，贪心均衡用）。
+    返回正常产出结果的 key 集合（崩溃未产出的不在其中，调用方按需兜底）。"""
+    if not jobs:
+        return set()
+    tmpdir = tempfile.mkdtemp(prefix="pk_batch_")
     env = dict(os.environ, PYTHONPATH=str(ROOT))
-    n = max(1, min(workers, len(todo)))
-    pending = list(todo)
-    running = []
+    # 长任务优先装箱（贪心均衡总成本，避免长任务集中拖尾）
+    jobs = sorted(jobs, key=lambda j: -(j.get("cost") or 1.0))
+    n = max(1, min(n_workers, len(jobs)))
+    # GPU worker 吞吐 ~4x：按加权负载装箱，等权会让 CPU 队列成长尾
+    wts = [4.0] * min(gpu_workers, n) + [1.0] * max(0, n - gpu_workers)
+    queues, load = [[] for _ in range(n)], [0.0] * n
+    for j in jobs:
+        k = min(range(n), key=lambda i: load[i] / wts[i])
+        queues[k].append(j)
+        load[k] += j.get("cost") or 1.0
+    running = []          # [proc, out_path, parsed_lines]（列表可原地更新）
+    done = set()
     try:
-        while pending or running:
-            while pending and len(running) < n:
-                island, ckey = pending.pop(0)
-                out = os.path.join(tmpdir, f"{abs(hash(ckey)) & 0xffffff}.json")
-                cmd = [sys.executable, "-m", "toolbox._pickup_scan_worker",
-                       str(video),
-                       f"{max(0.0, island['t0'] - look_back):.2f}",
-                       f"{island['t1'] + look_fwd:.2f}", f"{scan_fps}", out]
-                running.append((subprocess.Popen(cmd, env=env), out, ckey, island))
-            time.sleep(0.5)
+        for idx, q in enumerate(queues):
+            if not q:
+                continue
+            jf = os.path.join(tmpdir, f"jobs_{len(running)}.json")
+            of = jf.replace("jobs_", "out_")
+            Path(jf).write_text(json.dumps(q, ensure_ascii=False),
+                                encoding="utf-8")
+            cmd = [sys.executable, "-m", worker_module,
+                   *[str(a) for a in fixed_args], jf, of]
+            env_w = dict(env, TOOLBOX_OCR_CUDA="1") if idx < gpu_workers else env
+            running.append([subprocess.Popen(cmd, env=env_w), of, 0])
+        while running:
+            time.sleep(1.0)
             for item in running[:]:
-                proc, out, ckey, island = item
+                proc, of, parsed = item
+                if os.path.exists(of):
+                    for line in open(of, encoding="utf-8").read().splitlines()[parsed:]:
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            break           # 半行（正在写），下轮再读
+                        on_row(row)
+                        done.add(row.get("key"))
+                        parsed += 1
+                item[2] = parsed
                 if proc.poll() is None:
                     continue
                 running.remove(item)
-                if proc.returncode == 0:
-                    with open(out, encoding="utf-8") as f:
-                        cache[ckey] = json.load(f)
-                else:
-                    print(f"    [worker 失败 exit {proc.returncode}] "
-                          f"@{island['t0']:.0f}s，该岛走兜底", flush=True)
-                    cache[ckey] = []
-                cache_path.write_text(json.dumps(cache, ensure_ascii=False),
-                                       encoding="utf-8")
-                print(f"    [扫描] {len(cache)} 岛完成"
-                      f"（{island['t0']:.0f}-{island['t1']:.0f}s）", flush=True)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+    return done
+
+
+def scan_islands_parallel(video, todo, cache, cache_path, scan_fps,
+                          look_back, look_fwd, workers=None, gpu_workers=None,
+                          config=None):
+    """并行跑缺失岛的小扫描（批量持久 worker：每进程顺序处理一批岛，OCR
+    模型只加载一次；旧版每岛一个进程，31 岛要付 31 次解释器+模型启动）。
+    完成即增量落盘 cache（断点续跑只补未扫岛）；worker 失败的岛记空列表
+    ——下游自然走原簇兜底，且不反复重试。"""
+    from toolbox.detector import _gpu_workers_available
+    todo = [(island, ckey) for island, ckey in todo if ckey not in cache]
+    if not todo:
+        return
+    if workers is None:
+        workers = max(2, min(5, (os.cpu_count() or 4) // 4))
+    if gpu_workers is None:
+        # 必须传 config（detector 小节）：传 None 会让配置里调的
+        # detector.gpu_workers 在本链路失效（2026-09-22 修复的历史旁路）
+        gpu_workers = _gpu_workers_available((config or {}).get("detector"))
+    jobs = [{"key": ckey, "kind": "scan",
+             "t_lo": round(max(0.0, island["t0"] - look_back), 2),
+             "t_hi": round(island["t1"] + look_fwd, 2),
+             "it0": island["t0"], "it1": island["t1"],
+             "fps": scan_fps,
+             "cost": island["t1"] - island["t0"] + look_back + look_fwd}
+            for island, ckey in todo]
+    want = {j["key"] for j in jobs}
+
+    def on_row(row):
+        cache[row["key"]] = row.get("sessions") if row.get("ok") else []
+        if not row.get("ok"):
+            print(f"    [worker 失败] @{row.get('it0', 0):.0f}s，该岛走兜底",
+                  flush=True)
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False),
+                              encoding="utf-8")
+        print(f"    [扫描] {len([k for k in cache if k in want])} 岛完成"
+              f"（{row.get('it0', 0):.0f}-{row.get('it1', 0):.0f}s）", flush=True)
+
+    _batch_parallel("toolbox._pickup_scan_batch_worker", [video], jobs,
+                    workers, on_row, gpu_workers=gpu_workers)
+    for k in want:                     # 崩溃未产出：兜底空，不重试
+        if k not in cache:
+            cache[k] = []
+    cache_path.write_text(json.dumps(cache, ensure_ascii=False),
+                          encoding="utf-8")
+
+
+def lobby_checks_parallel(video, jobs, lobby_cache, lobby_path, workers=None,
+                          config=None):
+    """局外判别批量并行（jobs: [(lkey, t0, t1)]，整帧 OCR 每帧 ~1-2s，
+    串行 27 会话要 ~5-8min）。结果写回 lobby_cache 并逐行落盘。"""
+    from toolbox.detector import _gpu_workers_available
+    if not jobs:
+        return
+    if workers is None:
+        workers = max(2, min(6, (os.cpu_count() or 4) // 3))
+    jbs = [{"key": lkey, "kind": "lobby", "t0": round(t0, 2),
+            "t1": round(t1, 2), "cost": t1 - t0}
+           for lkey, t0, t1 in jobs]
+
+    def on_row(row):
+        lobby_cache[row["key"]] = bool(row.get("lobby"))
+        lobby_path.write_text(json.dumps(lobby_cache, ensure_ascii=False),
+                              encoding="utf-8")
+
+    _batch_parallel("toolbox._lobby_batch_worker", [video], jbs, workers,
+                    on_row,
+                    gpu_workers=_gpu_workers_available(
+                        (config or {}).get("detector")))
 
 
 def _attach_context(jumps, cluster_events):
@@ -351,19 +436,6 @@ def _session_label(evlist, price_table):
     return f"拾取_{containers[0]}+{jumps}"
 
 
-def _bases(videos):
-    """各分片基准钟（report 口径：文件名「DD日HH点MM分」），跨零点补一天。"""
-    bases, prev = {}, -1
-    for v in videos:
-        b = _part_base(str(v))
-        if b is None:
-            b = 0
-        if prev >= 0 and b < prev - 12 * 3600:
-            b += 86400
-        bases[str(v)] = prev = b
-    return bases
-
-
 def _clip_bad(clip: Path) -> bool:
     """解码级完整性自检（ffmpeg -v error 全流读一遍，坏文件会报 NAL 错）。"""
     r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(clip),
@@ -393,16 +465,18 @@ def _verify_and_recut(out_dir, index, videos, rounds=2):
 
 
 def pickups(target, config=None, merge=None, redetect=False, fps=1.0,
-            workers=1, scan_fps=1.0, scan_workers=None):
+            workers=None, scan_fps=1.0, scan_workers=None):
     """链路入口：粗定位 → 界面开合小扫描（岛屿级并行）→ 按会话裁剪。"""
+    from concurrent.futures import ThreadPoolExecutor
     config = config or load_config()
     pk = config.get("pickup", {})
     merge = pk.get("merge_sec", 25.0) if merge is None else merge
     look_back = pk.get("look_back", 35.0)
     look_fwd = pk.get("look_fwd", 15.0)
     max_sec = pk.get("max_sec", CLIP_MAX_SEC)
-    scan_workers = pk.get("scan_workers", 5) if scan_workers is None \
-        else scan_workers
+    if scan_workers is None:
+        scan_workers = pk.get("scan_workers") \
+            or max(2, min(8, (os.cpu_count() or 4) // 2))
     pt = dict(PRICE_TABLE)
     pt.update((config.get("detector") or {}).get("price_table", {}))
 
@@ -418,11 +492,13 @@ def pickups(target, config=None, merge=None, redetect=False, fps=1.0,
     for video in videos:
         events = (events_for_pickup(video, config, fps=fps, workers=workers)
                   if not redetect
-                  else _events_for_kd(video, config, redetect=True,
-                                      fps=fps, workers=workers))
+                  else events_for(video, config, redetect=True,
+                                  fps=fps, workers=workers))
         per_video.append((video, events))
         all_events += events
-    bases = _bases(videos)
+    # abs_t 基准钟：无时间戳分片按 0 计（原 _bases 口径，与 build_matches
+    # 内部的 skip 口径不同——后者用于局窗口，前者只做单分片内偏移）
+    bases = bases_for(videos, on_missing="zero")
 
     matches = build_matches({"videos": [str(v) for v in videos],
                              "events": all_events}) if all_events else []
@@ -447,11 +523,10 @@ def pickups(target, config=None, merge=None, redetect=False, fps=1.0,
     for video, events in per_video:
         clusters = merge_loots(events, merge)
         downs = sorted(e["t_start"] for e in events if e.get("kind") == "down")
-        part = _part_no(video)
+        part = part_no(video)
         duration = _video_duration(video)
         base = bases[str(video)]
         seen_keys = set()
-        n_sessions = 0
         # 岛列表先建齐，未扫描的岛并行跑（断点续跑只补缺口）
         islands_all = []
         for cluster in clusters:
@@ -464,7 +539,9 @@ def pickups(target, config=None, merge=None, redetect=False, fps=1.0,
               f"{sum(1 for _, k in islands_all if k not in cache)}）", flush=True)
         scan_islands_parallel(video, islands_all, cache, cache_path,
                               scan_fps, look_back, look_fwd,
-                              workers=scan_workers)
+                              workers=scan_workers, config=config)
+        # 候选会话先建齐；局外判别（整帧 OCR，串行一场 5-8min）批量并行
+        cands, lobby_jobs = [], []
         for island, ckey in islands_all:
             sessions = cache.get(ckey) or []
             usable = [s for s in sessions if s["jumps"]]
@@ -477,63 +554,81 @@ def pickups(target, config=None, merge=None, redetect=False, fps=1.0,
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-
                 evlist = _attach_context(s["jumps"], island["loots"])
                 first_pick = min(e["t"] for e in evlist)
                 last_pick = max(e["t"] for e in evlist)
-                ui0, ui1 = s["ui"]
-                label = _session_label(evlist, pt)
                 lkey = f"{video.name}|{first_pick:.1f}|{last_pick:.1f}"
+                cands.append({"s": s, "evlist": evlist,
+                              "first_pick": first_pick, "last_pick": last_pick,
+                              "label": _session_label(evlist, pt), "lkey": lkey})
                 if lkey not in lobby_cache:
-                    lobby_cache[lkey] = _lobby_check(
-                        video, first_pick - 2.0, last_pick + 1.0)
-                    lobby_path.write_text(json.dumps(lobby_cache,
-                                                     ensure_ascii=False),
-                                          encoding="utf-8")
-                if lobby_cache[lkey]:
-                    lobby_skipped.append({"part": part,
-                                          "t_start": round(first_pick, 1),
-                                          "label": label})
-                    print(f"    [局外剔除] P{part} {_mmss(first_pick)} {label}"
-                          "（大厅/仓库整理，非对局）", flush=True)
-                    continue
-                n_sessions += 1
-                t0 = max(0.0, min(ui0 - 2.0, first_pick - 4.5))
-                t1 = min(duration, max(ui1 + 2.5, last_pick + 6.0))
-                if t1 - t0 > max_sec:
-                    t1 = min(t1, max(t0 + max_sec, last_pick + 4.0))
-                seq += 1
-                out = out_dir / f"{seq:02d}_P{part}_{_mmss(first_pick)}_{_slug(label, 44)}.mp4"
-                _cut(video, t0, t1, out)
+                    lobby_jobs.append((lkey, first_pick - 2.0, last_pick + 1.0))
+        lobby_checks_parallel(video, lobby_jobs, lobby_cache, lobby_path,
+                              config=config)
 
-                abs_t = base + first_pick
-                prev_down = max((d for d in downs if d <= first_pick),
-                                default=None)
-                match_no = None
-                for i, ent in enumerate(enters):
-                    if ent <= abs_t:
-                        match_no = matches[i]["no"]
-                index["clips"].append({
-                    "file": out.name, "part": part,
-                    "t_start": first_pick, "t_end": last_pick,
-                    "cut": [round(t0, 2), round(t1, 2)],
-                    "ui": [round(ui0, 1), round(ui1, 1)],
-                    "src": video.name, "abs_t": round(abs_t, 1),
-                    "match_no": match_no, "fallback": s["fallback"],
-                    "jumps": sum(e["jump"] for e in evlist),
-                    "net_gain": s.get("net_gain"),
-                    "organizing": s.get("organizing", False),
-                    "ui_sec": round(ui1 - ui0, 1),
-                    "containers": sorted({e["container"] or "?"
-                                          for e in evlist}),
-                    "near_down": (round(first_pick - prev_down, 1)
-                                  if prev_down is not None
-                                  and first_pick - prev_down <= NEAR_DOWN_SEC
-                                  else None),
-                    "events": evlist})
-                print(f"    [{seq:02d}] P{part} {_mmss(first_pick)} {label}"
-                      f" ui {ui1 - ui0:.0f}s"
-                      + ("（兜底）" if s["fallback"] else ""), flush=True)
+        # 裁剪 + 索引；ffmpeg 重编码切片并行（4 进程 × -threads 4）
+        n_sessions = 0
+        cut_jobs = []
+        for c in cands:
+            if lobby_cache.get(c["lkey"]):
+                lobby_skipped.append({"part": part,
+                                      "t_start": round(c["first_pick"], 1),
+                                      "label": c["label"]})
+                print(f"    [局外剔除] P{part} {_mmss(c['first_pick'])} "
+                      f"{c['label']}（大厅/仓库整理，非对局）", flush=True)
+                continue
+            n_sessions += 1
+            s, evlist = c["s"], c["evlist"]
+            ui0, ui1 = s["ui"]
+            first_pick, last_pick = c["first_pick"], c["last_pick"]
+            t0 = max(0.0, min(ui0 - 2.0, first_pick - 4.5))
+            t1 = min(duration, max(ui1 + 2.5, last_pick + 6.0))
+            if t1 - t0 > max_sec:
+                t1 = min(t1, max(t0 + max_sec, last_pick + 4.0))
+            seq += 1
+            out = out_dir / (f"{seq:02d}_P{part}_{_mmss(first_pick)}_"
+                             f"{_slug(c['label'], 44)}.mp4")
+            abs_t = base + first_pick
+            prev_down = max((d for d in downs if d <= first_pick),
+                            default=None)
+            match_no = None
+            for i, ent in enumerate(enters):
+                if ent <= abs_t:
+                    match_no = matches[i]["no"]
+            cut_jobs.append({
+                "file": out.name, "part": part, "src_video": video,
+                "cut": [round(t0, 2), round(t1, 2)],
+                "t_start": first_pick, "t_end": last_pick,
+                "ui": [round(ui0, 1), round(ui1, 1)],
+                "abs_t": round(abs_t, 1), "match_no": match_no,
+                "fallback": s["fallback"],
+                "jumps": sum(e["jump"] for e in evlist),
+                "net_gain": s.get("net_gain"),
+                "organizing": s.get("organizing", False),
+                "ui_sec": round(ui1 - ui0, 1),
+                "containers": sorted({e["container"] or "?" for e in evlist}),
+                "near_down": (round(first_pick - prev_down, 1)
+                              if prev_down is not None
+                              and first_pick - prev_down <= NEAR_DOWN_SEC
+                              else None),
+                "events": evlist, "print": (f"    [{seq:02d}] P{part} "
+                                            f"{_mmss(first_pick)} {c['label']}"
+                                            f" ui {ui1 - ui0:.0f}s"
+                                            + ("（兜底）" if s["fallback"] else ""))})
+        if cut_jobs:
+            with ThreadPoolExecutor(4) as ex:
+                list(ex.map(lambda j: _cut(j["src_video"], j["cut"][0],
+                                           j["cut"][1], out_dir / j["file"]),
+                            cut_jobs))
+            for j in cut_jobs:
+                index["clips"].append(
+                    {k: j[k] for k in
+                     ("file", "part", "t_start", "t_end", "cut",
+                      "ui", "abs_t", "match_no", "fallback", "jumps",
+                      "net_gain", "organizing", "ui_sec", "containers",
+                      "near_down", "events")}
+                    | {"src": j["src_video"].name})
+                print(j["print"], flush=True)
         print(f"  {video.name[:36]}：{len(clusters)} 粗簇 -> {n_sessions} 会话",
               flush=True)
 

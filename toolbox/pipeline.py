@@ -44,7 +44,7 @@ def run_pipeline(target, config=None, skip=(), run_eval=False):
         target = str(stage("download", lambda: download(target)))
     skip.add("download")
 
-    from toolbox.knockdown import collect_videos, events_for
+    from toolbox.events import collect_videos, events_for
     videos = collect_videos(target)
     session = Path(target).name
     print(f"[pipeline] 场次：{session}，{len(videos)} 个分片")
@@ -60,6 +60,17 @@ def run_pipeline(target, config=None, skip=(), run_eval=False):
         return list(d for d in dirs if d)
 
     stage("asr", do_asr)
+
+    if "asr" in skip:
+        # --skip asr 只该跳过转写本身：从已有产物重建 分片->asr目录 映射，
+        # 否则下面的 speaker/voice 会遍历空映射静默空转（还照常打印「完成」）
+        from toolbox.asr import find_transcript_dir
+        asr_dirs = {v.name: find_transcript_dir(v) for v in videos}
+        missing = [v.name for v, d in asr_dirs.items() if not d]
+        if missing:
+            shown = "、".join(missing[:3]) + ("…" if len(missing) > 3 else "")
+            print(f"[pipeline] 警告：{len(missing)}/{len(videos)} 个分片无已有"
+                  f"转写产物（{shown}），speaker/voice 将跳过它们", flush=True)
 
     def do_speaker():
         from toolbox import speaker
@@ -91,10 +102,19 @@ def run_pipeline(target, config=None, skip=(), run_eval=False):
 
     def do_voice():
         from toolbox.voice import voice_session
-        outs = []
+        outs, skipped = [], []
         for d in asr_dirs.values():
-            if d and (d / "transcript.json").is_file():
+            if not (d and (d / "transcript.json").is_file()):
+                continue
+            try:                       # 单分P失败只跳过它（如无 host 语音）
                 outs.append(voice_session(str(d), config))
+            except Exception as e:    # noqa: BLE001 分P相互独立，隔离故障
+                skipped.append(f"{Path(d).name}({type(e).__name__})")
+                print(f"[pipeline] voice 跳过 {Path(d).name}："
+                      f"{type(e).__name__}: {e}", flush=True)
+        if skipped:
+            print(f"[pipeline] voice 部分完成（{len(skipped)} 个分P无 host 语音："
+                  f"{', '.join(skipped[:6])}）", flush=True)
         return outs
 
     stage("voice", do_voice)

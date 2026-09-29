@@ -200,7 +200,7 @@ def _safe_title(title, limit=60):
 
 
 def _stamp(dt: datetime):
-    """report._part_base 认的跨分片基准钟格式。"""
+    """chrono.part_base 认的跨分片基准钟格式。"""
     return f"{dt.day}日{dt.hour:02d}点{dt.minute:02d}分"
 
 
@@ -290,7 +290,17 @@ def _record_segment(url, flv: Path, stop_at, stall_sec):
     print(f"    录制 -> {flv.name}", flush=True)
     proc = subprocess.Popen(_ffmpeg_cmd(url, flv), stdin=subprocess.PIPE)
     seg_t0 = time.time()
-    _probe_video(flv)
+    try:
+        # 探测最长阻塞 25s，且其内部 except Exception 接不住 Ctrl+C：
+        # 此窗口内退出必须先收尸，否则 ffmpeg 成孤儿进程持续写盘
+        _probe_video(flv)
+    except BaseException:
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
     last_size, last_growth, last_log = -1, time.time(), seg_t0
     reason = "eof"
     try:

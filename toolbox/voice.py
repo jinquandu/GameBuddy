@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from toolbox.config import DATA, load_config
-from toolbox.knockdown import _mmss, _slug
+from toolbox.naming import mmss as _mmss, slug as _slug
 
 SR = 16000
 
@@ -252,6 +252,8 @@ def hype_of(rows, refs):
 
 def pick_segments(rows, hype, sentences, dur):
     """hype 阈值区间合并 -> 吸附到 host 句边界（一段完整的话）。"""
+    if not len(hype) or not rows:    # 极短分P（测试段）无窗口信号，无候选
+        return []
     times = np.array([r["t"] for r in rows])
     th = float(np.percentile(hype, HYPER_PCTL))
     idx = np.where(hype >= th)[0]
@@ -383,7 +385,12 @@ def segment_signals(t0, t1, sentences, audio_path, rows, base, f0_base):
     n = len(seg) // int(SR * HOP)
     r_ = np.sqrt((seg[:n * int(SR * HOP)].reshape(
         n, int(SR * HOP)) ** 2).mean(axis=1))
-    m = base["host_mask"][int(t0 / HOP):int(t0 / HOP) + n][:len(r_)]
+    m = base["host_mask"][int(t0 / HOP):int(t0 / HOP) + n]
+    if len(m) < n:
+        # 尾分片：ASR 句界越过音频末尾，整场 host_mask 先见底（实测
+        # P11 差 1 bin 触发 broadcast 崩溃）——对齐长度，末窗丢弃
+        n = len(m)
+        r_ = r_[:n]
     m = m & (r_ > 0) & (r_ > base["rms_p40"] * 0.5)
 
     f0 = _yin(seg)

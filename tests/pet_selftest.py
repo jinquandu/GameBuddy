@@ -4,7 +4,7 @@ import tkinter as tk
 
 sys.path.insert(0, ".")
 
-from toolbox.pet import PetWindow, ProgressParser, latest_stats
+from toolbox.pet import PetWindow, ProgressParser, latest_stats, DATA
 
 FAIL = []
 
@@ -57,23 +57,28 @@ p2 = ProgressParser()
 p2.update("\n[错误] 需要 GNU rsync")
 check("错误行捕获", p2.error_line and "rsync" in p2.error_line)
 
-# ---- 2) latest_stats：对着现有 data/ 树 ----
+# ---- 2) latest_stats：对着现有 data/ 树（结构性校验，不硬编码本地数据）----
 st = latest_stats()
 print("latest_stats ->", st)
-check("最近场次是猪猪夏", "猪猪夏" in st["session"])
-check("击倒=0", st["knockdowns"] == 0)
-check("拾取=34", st["pickups"] == 34)
-check("语音=31", st["voice"] == 31)
+check("键完整", set(st) == {"session", "knockdowns", "pickups", "voice"})
+check("计数类型", all(st[k] is None or (isinstance(st[k], int) and st[k] >= 0)
+                      for k in ("knockdowns", "pickups", "voice")))
+vdirs = [p.name for p in (DATA / "voice").iterdir()] \
+    if (DATA / "voice").is_dir() else []
+check("场次名与产物目录对得上",
+      not st["session"]
+      or (DATA / "knockdowns" / st["session"]).is_dir()
+      or any(d.startswith(st["session"]) for d in vdirs))
 
-# ---- 3) GUI 冒烟：创建 -> 两个动画帧 -> 收起 -> 展开 -> 销毁 ----
+# ---- 3) GUI 冒烟：创建 -> 渲染 -> 收起 -> 展开 -> 空地址提示 -> 销毁 ----
 try:
     win = PetWindow()
     check("窗口创建", True)
-    win.update()                       # 渲染一帧
-    win._animate()                     # 手动触发动画回调一次
     win.update()
-    bubble0 = win.pet_cv.itemcget(win.bubble, "text")
-    check("气泡文案", bool(bubble0))
+    win._render()                      # 手动渲染一帧（阶段表/战绩条重绘）
+    win._refresh_idle_stats()
+    win.update()
+    check("战绩条文案", bool(win.loot_lab.cget("text").strip()))
     check("阶段表 8 项", len(win.stage_labels) == 8)
     win._toggle_collapse()
     win.update()
@@ -85,7 +90,7 @@ try:
     win.addr_var.set("")
     win._toggle_run()
     win.update()
-    check("空地址提示", "地址" in win.pet_cv.itemcget(win.bubble, "text"))
+    check("空地址提示", "地址" in win._status_text)
     win._save_hist()
     win.destroy()
     check("GUI 冒烟完成", True)

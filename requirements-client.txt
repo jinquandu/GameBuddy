@@ -1,5 +1,9 @@
-# 应用端（Mac）完整依赖 = 核心全部 + ASR/说话人/语音线
-# 安装：pip install -r requirements-client.txt
+# 应用端（Windows/Mac）完整依赖 = 核心全部 + ASR/说话人/语音线（CPU 基座）
+# 安装：pip install -r requirements-client.txt          # 纯 CPU，装机 ~2.0GB
+#       pip install -r requirements-client.txt -r requirements-gpu.txt
+#                                                        # 双链路，装机 ~5.5GB
+# 两套链路同一份代码：GPU 依赖缺失时 ocr_gpu 自动回退 CPU 路径，
+# 不需要按机器选包——有 N 卡的机器装 GPU 档即可。
 -r requirements.txt
 
 # ASR 转写（toolbox/asr.py 应用端节点 2；模型首次运行从 ModelScope 自动下载 ~1GB）
@@ -26,11 +30,5 @@ datasets
 # 主播语音情绪评估（toolbox/voice.py 应用端节点 13 计算：RMS/基频 yin）
 librosa>=0.10
 
-# ---- 可选：OCR 走 GPU（NVIDIA + Windows，默认不装）----
-# 2026-09-18 RTX3070Ti 同素材实测反而慢 43%（模型小、解码占大头），默认
-# CPU。要实验时：torch/torchaudio 需换 +cu126 版本（onnxruntime-gpu 1.22
-# 按 CUDA12 编译，CUDA DLL 借道 torch/lib，免装 Toolkit），再在 config.yaml
-# 开 detector.ocr_use_cuda: true。
-# torch==2.11.0+cu126 --index-url https://download.pytorch.org/whl/cu126
-# torchaudio==2.11.0+cu126
-# onnxruntime-gpu==1.22.0
+# OCR（rapidocr-onnxruntime 走 CPU EP）随 requirements.txt 核心；
+# GPU 提速见 requirements-gpu.txt（detect 批量引擎 + ASR 吃 CUDA）

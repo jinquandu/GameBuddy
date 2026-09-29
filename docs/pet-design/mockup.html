@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>陪玩大师姐 · 跑链小卡 UI 视觉稿 v1.1</title>
+<style>
+  :root {
+    --coral: #F08A85;
+    --coral-deep: #E8663C;
+    --coral-grad: linear-gradient(135deg, #F08A85, #E8663C);
+    --gold: #F2C14E;
+    --ink: #3A3238;
+    --ink-2: #6B5F68;
+    --milk: #F7F5F2;
+    --paper: #FFFEFC;
+    --cream: #FDF7F2;
+    --lilac: #9B6B8F;
+    --good: #4CA37E;
+    --bad: #D9534F;
+    --warn: #D99A3C;
+    --shadow: 0 18px 50px rgba(58, 50, 56, .22);
+    font-family: "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(1200px 700px at 78% 82%, rgba(240,138,133,.28), transparent 60%),
+      radial-gradient(900px 600px at 12% 15%, rgba(155,107,143,.25), transparent 55%),
+      linear-gradient(160deg, #2E2830 0%, #463843 55%, #5A4152 100%);
+    display: flex; align-items: center; justify-content: center;
+    gap: 64px; padding: 40px; overflow: hidden;
+  }
+
+  /* ============ 跑链小卡 ============ */
+  .pet-window {
+    width: 342px; border-radius: 20px; overflow: hidden;
+    background: var(--paper); box-shadow: var(--shadow);
+    border: 1px solid rgba(255,255,255,.6);
+    transition: all .45s cubic-bezier(.6,-0.28,.74,.05);
+  }
+  .pet-window.collapsed .win-body { display: none; }
+
+  /* —— 标题栏（无头像） —— */
+  .win-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; cursor: grab;
+    background: linear-gradient(180deg, #FFF9F4, #FFF3EC);
+    border-bottom: 1px solid #F3E3D9;
+  }
+  .wtext { flex: 1; min-width: 0; }
+  .wname { font-size: 13px; font-weight: 700; color: var(--ink); line-height: 1.2; }
+  .tenant-badge {
+    display: inline-flex; align-items: center; gap: 4px; margin-top: 2px;
+    font-size: 10px; color: var(--coral-deep);
+    background: rgba(240,138,133,.16); border: 1px solid rgba(240,138,133,.45);
+    padding: 1px 7px; border-radius: 999px; font-weight: 600;
+  }
+  .tenant-badge .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--good); }
+  .btns { display: flex; gap: 2px; }
+  .wbtn {
+    width: 24px; height: 24px; border-radius: 8px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: var(--ink-2); cursor: pointer; transition: .15s;
+  }
+  .wbtn:hover { background: rgba(58,50,56,.08); }
+  .wbtn.close:hover { background: var(--bad); color: #fff; }
+
+  /* —— 状态行（一句话报进展） —— */
+  .status-line {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--cream); border-bottom: 1px solid #F3E3D9;
+    padding: 8px 14px; font-size: 11.5px; color: var(--lilac);
+  }
+  .status-line .pulse {
+    width: 8px; height: 8px; border-radius: 50%; flex: none;
+    background: currentColor;
+    animation: pulseDot 1.4s ease-in-out infinite;
+  }
+  @keyframes pulseDot { 0%,100% { opacity:.4; transform: scale(.8);}
+                        50% { opacity:1; transform: scale(1.15);} }
+  .pet-window[data-state="run"]    .status-line { color: var(--coral-deep); }
+  .pet-window[data-state="done"]   .status-line { color: var(--good); }
+  .pet-window[data-state="err"]    .status-line { color: var(--bad); }
+  .pet-window[data-state="stop"]   .status-line { color: var(--warn); }
+
+  /* —— 窗口主体 —— */
+  .win-body { padding: 10px 12px 14px; }
+
+  .loot-bar {
+    display: flex; align-items: center; gap: 8px;
+    background: linear-gradient(90deg, #FDF1E7, #FBEBEF);
+    border: 1px solid #F2DCCE; border-radius: 12px;
+    padding: 7px 11px; margin-bottom: 10px; font-size: 11px; color: var(--ink);
+  }
+  .loot-bar .t { color: var(--lilac); font-weight: 700; flex: none; }
+  .loot-chip { display: flex; gap: 9px; flex: 1; justify-content: space-around; }
+  .loot-chip b { color: var(--coral-deep); font-size: 12.5px; }
+  .loot-chip span { color: var(--ink-2); }
+
+  .stages {
+    background: var(--milk); border: 1px solid #EEE3DA; border-radius: 14px;
+    padding: 10px 12px 6px; margin-bottom: 10px;
+  }
+  .st-title { font-size: 10px; color: var(--lilac); font-weight: 700;
+              letter-spacing: 2px; margin-bottom: 6px; }
+  .st-row { display: flex; align-items: center; gap: 8px;
+            padding: 3px 0; font-size: 11.5px; color: var(--ink-2); }
+  .st-ico {
+    width: 18px; height: 18px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; background: #EFE6DE; color: #B9AAB1; transition: .3s;
+  }
+  .st-row.done { color: var(--ink); }
+  .st-row.done .st-ico { background: rgba(76,163,126,.15); color: var(--good); }
+  .st-row.run { color: var(--coral-deep); font-weight: 700; }
+  .st-row.run .st-ico { background: var(--coral-grad); color: #fff; }
+  .st-row.err { color: var(--bad); font-weight: 700; }
+  .st-row.err .st-ico { background: rgba(217,83,79,.14); color: var(--bad); }
+  .st-row.skip .st-name { text-decoration: line-through; opacity: .55; }
+  .st-name { flex: 1; }
+  .st-sec { font-size: 10px; color: #C4B6BD; font-variant-numeric: tabular-nums; }
+  .st-row.done .st-sec { color: var(--good); font-weight: 600; }
+
+  .cfg {
+    background: #fff; border: 1px solid #EEE3DA; border-radius: 14px;
+    padding: 11px 12px; margin-bottom: 11px;
+  }
+  .cfg-lab { font-size: 10.5px; color: var(--lilac); font-weight: 700; margin-bottom: 5px;
+             display: flex; align-items: center; gap: 5px; }
+  .cfg-lab .hint { color: #C4B6BD; font-weight: 400; font-size: 9.5px; }
+  .addr-row { display: flex; gap: 6px; }
+  .fake-input {
+    flex: 1; display: flex; align-items: center;
+    background: var(--milk); border: 1.5px solid #E8D9CF; border-radius: 9px;
+    padding: 6px 9px; font-size: 11px; color: var(--ink); min-width: 0;
+  }
+  .fake-input input, .fake-input select {
+    border: none; background: transparent; outline: none; width: 100%;
+    font: inherit; color: inherit;
+  }
+  .icon-btn {
+    width: 44px; border-radius: 9px; border: 1.5px solid #E8D9CF;
+    background: var(--milk); display: flex; align-items: center;
+    justify-content: center; cursor: pointer; font-size: 11px; flex: none;
+  }
+  .icon-btn:hover { border-color: var(--coral); background: #FDF1EC; }
+  .cfg-gap { height: 11px; }
+
+  .switch-row { display: flex; align-items: center; gap: 7px; margin-top: 10px;
+                font-size: 11px; color: var(--ink); }
+  .switch {
+    width: 32px; height: 18px; border-radius: 999px; background: #E3D6CD;
+    position: relative; cursor: pointer; transition: .2s; flex: none;
+  }
+  .switch::after {
+    content: ""; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px;
+    border-radius: 50%; background: #fff; transition: .2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  }
+  .switch.on { background: var(--coral); }
+  .switch.on::after { left: 16px; }
+  .switch-row .sub { color: #C4B6BD; font-size: 9.5px; }
+
+  .go-btn {
+    width: 100%; height: 40px; border: none; border-radius: 13px;
+    background: var(--coral-grad); color: #fff; font-size: 14px; font-weight: 700;
+    letter-spacing: 1px; cursor: pointer; font-family: inherit;
+    box-shadow: 0 8px 20px rgba(232,102,60,.35);
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    transition: .15s;
+  }
+  .go-btn:hover { transform: translateY(-1px); filter: brightness(1.05); }
+  .go-btn:active { transform: translateY(1px); }
+  .go-btn .tri {
+    width: 20px; height: 20px; background: #fff; border-radius: 50%;
+    color: var(--coral-deep); font-size: 10px;
+    display: flex; align-items: center; justify-content: center; padding-left: 2px;
+  }
+  .go-btn.stop { background: linear-gradient(135deg, #D9534F, #B93E3A);
+                 box-shadow: 0 8px 20px rgba(217,83,79,.35); }
+  .go-btn.breath { animation: breath 2s ease-in-out infinite; }
+  @keyframes breath { 0%,100% { box-shadow: 0 8px 20px rgba(232,102,60,.35); }
+                      50% { box-shadow: 0 8px 30px rgba(232,102,60,.62); } }
+
+  /* ============ 页面说明 ============ */
+  .side { color: #F3E9E4; max-width: 300px; }
+  .side h1 { font-size: 19px; margin-bottom: 4px; color: #fff; }
+  .side h1 em { font-style: normal; color: var(--coral); }
+  .side .sub { font-size: 11px; color: #C9AFB8; margin-bottom: 18px; letter-spacing: 1px; }
+  .ctrl-card {
+    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14);
+    border-radius: 16px; padding: 14px; backdrop-filter: blur(6px);
+  }
+  .ctrl-card h3 { font-size: 11px; color: var(--gold); letter-spacing: 2px; margin-bottom: 9px; }
+  .seg { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+  .seg button {
+    border: 1px solid rgba(255,255,255,.22); background: transparent; color: #EAD9DE;
+    font-size: 11px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
+    font-family: inherit; transition: .15s;
+  }
+  .seg button:hover { border-color: var(--coral); }
+  .seg button.on { background: var(--coral-grad); border-color: transparent;
+                   color: #fff; font-weight: 700; box-shadow: 0 4px 12px rgba(232,102,60,.4); }
+  .legend { font-size: 10.5px; color: #B79FA9; line-height: 1.8; }
+  .legend b { color: #F3D9B1; font-weight: 600; }
+  .palette { display: flex; gap: 6px; margin-top: 10px; }
+  .palette i { width: 22px; height: 22px; border-radius: 7px; border: 1px solid rgba(255,255,255,.25); }
+</style>
+</head>
+<body>
+
+  <!-- ===================== 跑链小卡 ===================== -->
+  <div class="pet-window" id="win" data-state="run">
+
+    <!-- 标题栏（无头像） -->
+    <div class="win-header" id="dragbar">
+      <div class="wtext">
+        <div class="wname">陪玩大师姐 · 跑链小卡</div>
+        <div class="tenant-badge"><span class="dot"></span>租户 <span id="tenant-echo">dashijie</span></div>
+      </div>
+      <div class="btns">
+        <div class="wbtn" id="btn-fold" title="收起 / 展开">—</div>
+        <div class="wbtn close" title="退出">✕</div>
+      </div>
+    </div>
+
+    <!-- 状态行 -->
+    <div class="status-line"><span class="pulse"></span><span id="status-text">跑链中 4/8 · OCR 行为检测中…</span></div>
+
+    <!-- 主体 -->
+    <div class="win-body">
+      <div class="loot-bar">
+        <span class="t">最近场次</span>
+        <div class="loot-chip">
+          <span>击倒 <b id="n-kd">14</b></span>
+          <span>拾取 <b id="n-pk">9</b></span>
+          <span>语音 <b id="n-vc">6</b></span>
+        </div>
+      </div>
+
+      <div class="stages">
+        <div class="st-title">识 别 链 进 展</div>
+        <div class="st-row" data-st="download"><i class="st-ico">✓</i><span class="st-name">下载</span><span class="st-sec">86s</span></div>
+        <div class="st-row" data-st="asr"><i class="st-ico">✓</i><span class="st-name">ASR 转写</span><span class="st-sec">540s</span></div>
+        <div class="st-row" data-st="speaker"><i class="st-ico">✓</i><span class="st-name">说话人区分</span><span class="st-sec">95s</span></div>
+        <div class="st-row" data-st="detect"><i class="st-ico">▶</i><span class="st-name">OCR 行为检测</span><span class="st-sec">…</span></div>
+        <div class="st-row" data-st="knockdowns"><i class="st-ico">○</i><span class="st-name">击倒切片</span><span class="st-sec"></span></div>
+        <div class="st-row" data-st="pickups"><i class="st-ico">○</i><span class="st-name">拾取切片</span><span class="st-sec"></span></div>
+        <div class="st-row" data-st="voice"><i class="st-ico">○</i><span class="st-name">语音情绪评估</span><span class="st-sec"></span></div>
+        <div class="st-row" data-st="push"><i class="st-ico">○</i><span class="st-name">推评估包</span><span class="st-sec"></span></div>
+      </div>
+
+      <div class="cfg">
+        <div class="cfg-lab">🎬 录像地址 <span class="hint">BV号 / URL / 场次目录</span></div>
+        <div class="addr-row">
+          <div class="fake-input">
+            <select id="addr-sel">
+              <option>BV1xx411c7mD · 三角洲午夜场</option>
+              <option>https://live.bilibili.com/14735356</option>
+              <option>video/直接跑刀2小时一千三</option>
+            </select>
+          </div>
+          <div class="icon-btn" title="浏览目录">浏览</div>
+        </div>
+        <div class="cfg-gap"></div>
+        <div class="cfg-lab">🏷 租户 ID <span class="hint">写入 config.yaml · server.tenant</span></div>
+        <div class="addr-row">
+          <div class="fake-input">
+            <input id="tenant-input" value="dashijie" spellcheck="false">
+          </div>
+          <div class="icon-btn" id="tenant-save" title="保存到 config.yaml">保存</div>
+        </div>
+        <div class="switch-row">
+          <div class="switch on" id="sw-eval"></div>
+          <span>推评估并打标</span><span class="sub">--run-eval</span>
+        </div>
+      </div>
+
+      <button class="go-btn breath" id="go-btn">
+        <span class="tri" id="go-ico">▶</span><span id="go-txt">停止</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ===================== 演示控制 ===================== -->
+  <div class="side">
+    <h1>大师姐 · <em>跑链小卡 v1.1</em></h1>
+    <div class="sub">PET-UI MOCKUP · 2026-09-22 · 紧凑版（无立绘/无头像）</div>
+
+    <div class="ctrl-card">
+      <h3>状 态 切 换</h3>
+      <div class="seg" id="seg-state">
+        <button data-v="idle">😴 待机</button>
+        <button data-v="run" class="on">🏃 跑链中</button>
+        <button data-v="done">🎉 完成</button>
+        <button data-v="err">😵 出错</button>
+        <button data-v="stop">🛑 停止</button>
+      </div>
+
+      <h3>形 态 切 换</h3>
+      <div class="seg" id="seg-form">
+        <button data-v="full" class="on">展开小卡</button>
+        <button data-v="mini">收起标题条</button>
+      </div>
+
+      <div class="legend">
+        <b>v1.1 变更</b>：移除顶部立绘区与标题栏头像，改为紧凑工具卡；<br>
+        进展由<b>状态行</b>（彩色 · 脉冲圆点）报告：跑链中 4/8 · OCR 行为检测中…<br>
+        <b>租户</b>：改左侧输入框 → 顶部徽章联动 → 保存回写 config.yaml
+      </div>
+
+      <div class="palette">
+        <i style="background:#F08A85" title="珊瑚粉"></i>
+        <i style="background:#E8663C" title="播放键橙红"></i>
+        <i style="background:#F2C14E" title="星星金"></i>
+        <i style="background:#9B6B8F" title="雾紫"></i>
+        <i style="background:#F7F5F2" title="米白"></i>
+        <i style="background:#3A3238" title="发色黑"></i>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ---------------- 状态配置表（与 pet.py 状态机对应） ---------------- */
+const STATE = {
+  idle: { status: "待命中～把录像地址给我呀", btn: ["▶", "开始跑链", "go-btn breath"] },
+  run:  { status: "跑链中 4/8 · OCR 行为检测中…", btn: ["■", "停止", "go-btn stop"] },
+  done: { status: "完成！击倒14 拾取9 语音6", btn: ["▶", "开始跑链", "go-btn breath"] },
+  err:  { status: "出错：第4步 OCR，看日志排查", btn: ["▶", "重试", "go-btn"] },
+  stop: { status: "已手动停止，素材我先收好…", btn: ["▶", "开始跑链", "go-btn"] },
+};
+const STAGE_DEMO = {
+  idle:  [["skip","—"],["skip","—"],["skip","—"],["skip","—"],["skip","—"],["skip","—"],["skip","—"],["skip","—"]],
+  run:   [["done","86s"],["done","540s"],["done","95s"],["run","…"],["pending",""],["pending",""],["pending",""],["pending",""]],
+  done:  [["done","86s"],["done","540s"],["done","95s"],["done","660s"],["done","74s"],["done","88s"],["done","120s"],["done","96s"]],
+  err:   [["done","86s"],["done","540s"],["done","95s"],["err","✗"],["pending",""],["pending",""],["pending",""],["pending",""]],
+  stop:  [["done","86s"],["done","540s"],["run","…"],["pending",""],["pending",""],["pending",""],["pending",""],["pending",""]],
+};
+const ICON = { done: "✓", run: "▶", err: "!", pending: "○", skip: "—" };
+
+const win = document.getElementById("win");
+const $ = id => document.getElementById(id);
+
+function setState(s) {
+  const cfg = STATE[s];
+  win.dataset.state = s;
+  $("status-text").textContent = cfg.status;
+  const [ico, txt, cls] = cfg.btn;
+  $("go-ico").textContent = ico; $("go-txt").textContent = txt;
+  $("go-btn").className = cls;
+  document.querySelectorAll(".st-row").forEach((row, i) => {
+    const [st, sec] = STAGE_DEMO[s][i];
+    row.className = "st-row " + (st === "pending" ? "" : st);
+    row.querySelector(".st-ico").textContent = ICON[st];
+    row.querySelector(".st-sec").textContent = sec;
+  });
+  document.querySelectorAll("#seg-state button").forEach(b =>
+    b.classList.toggle("on", b.dataset.v === s));
+}
+
+function setForm(f) {
+  win.classList.toggle("collapsed", f === "mini");
+  document.querySelectorAll("#seg-form button").forEach(b =>
+    b.classList.toggle("on", b.dataset.v === f));
+}
+
+/* 拖动演示（真实产品中拖动标题栏移动窗口） */
+(() => {
+  let sx, sy, ox, oy, dragging = false;
+  const bar = $("dragbar");
+  bar.addEventListener("mousedown", e => {
+    if (e.target.closest(".wbtn")) return;
+    dragging = true; sx = e.clientX; sy = e.clientY;
+    ox = win.offsetLeft; oy = win.offsetTop; bar.style.cursor = "grabbing";
+  });
+  addEventListener("mousemove", e => {
+    if (!dragging) return;
+    win.style.position = "absolute";
+    win.style.left = ox + e.clientX - sx + "px";
+    win.style.top  = oy + e.clientY - sy + "px";
+  });
+  addEventListener("mouseup", () => { dragging = false; bar.style.cursor = "grab"; });
+})();
+
+document.querySelectorAll("#seg-state button").forEach(b =>
+  b.onclick = () => setState(b.dataset.v));
+document.querySelectorAll("#seg-form button").forEach(b =>
+  b.onclick = () => setForm(b.dataset.v));
+$("btn-fold").onclick = () =>
+  setForm(win.classList.contains("collapsed") ? "full" : "mini");
+$("tenant-input").addEventListener("input", e =>
+  $("tenant-echo").textContent = e.target.value || "—");
+$("sw-eval").onclick = () => $("sw-eval").classList.toggle("on");
+$("go-btn").onclick = () =>
+  setState(win.dataset.state === "run" ? "stop" : "run");
+
+setState("run");
+</script>
+</body>
+</html>

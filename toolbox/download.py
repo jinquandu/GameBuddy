@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -65,18 +66,23 @@ def fetch(url, dest: Path):
             if pos:
                 h["Range"] = f"bytes={pos}-"
             req = urllib.request.Request(url, headers=h)
-            with urllib.request.urlopen(req, timeout=30) as r, open(dest, "ab") as f:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                if pos and r.status != 206:
+                    # 服务器忽略 Range 回 200 全量：清空残段从头下，
+                    # 否则 append 模式会拼出「残段+全量」的坏文件还误判成功
+                    pos = 0
                 total = int(r.headers.get("Content-Length", 0)) + pos
                 n, last = pos, time.time()
-                while True:
-                    chunk = r.read(1 << 20)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    n += len(chunk)
-                    if time.time() - last > 20:
-                        print(f"    {n/1e6:.0f}/{total/1e6:.0f}MB", flush=True)
-                        last = time.time()
+                with open(dest, "ab" if pos else "wb") as f:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        n += len(chunk)
+                        if time.time() - last > 20:
+                            print(f"    {n/1e6:.0f}/{total/1e6:.0f}MB", flush=True)
+                            last = time.time()
                 if n == total:
                     return
                 print(f"  连接中断于 {n/1e6:.0f}MB，续传...", flush=True)
@@ -131,7 +137,9 @@ def download(url_or_bvid, parts="all", out_dir=None):
         v = vids[0]
         print(f"  视频 {v['width']}x{v['height']} {v['codecs']} | "
               f"音频 {audio['codecs']} {audio['bandwidth']//1000}kbps", flush=True)
-        fv, fa = Path(f"/tmp/bili_v_{p['cid']}.m4s"), Path(f"/tmp/bili_a_{p['cid']}.m4s")
+        # tempfile.gettempdir()：Windows 上没有 /tmp，硬编码会崩在盘根（2026-09-22）
+        tmp_root = Path(tempfile.gettempdir())
+        fv, fa = tmp_root / f"bili_v_{p['cid']}.m4s", tmp_root / f"bili_a_{p['cid']}.m4s"
         for tmp in (fv, fa):
             if tmp.exists():
                 tmp.unlink()

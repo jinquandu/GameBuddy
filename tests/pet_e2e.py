@@ -30,13 +30,14 @@ while win.state not in ("done", "err", "stop") and time.time() - t0 < 60:
     win.update()
     time.sleep(0.05)
 
-bubble = win.pet_cv.itemcget(win.bubble, "text")
+status = win._status_text
 done_stages = [n for n, s in win.parser.stages.items() if s["status"] == "skip"]
 print("state =", win.state)
-print("bubble =", bubble)
-print("skip 标记数 =", len(done_stages), "bar =", win.bar["value"])
-print("日志尾 =", win.log_lab.cget("text"))
-ok = win.state == "done" and "完成" in bubble and len(done_stages) == 8
+print("status =", status)
+print("skip 标记数 =", len(done_stages),
+      "done_count =", win.parser.done_count())
+print("日志尾 =", win._logs[-1] if win._logs else "")
+ok = win.state == "done" and "完成" in status and len(done_stages) == 8
 win._on_close() if win.proc is None else None
 win.destroy()
 print("E2E", "PASS ✅" if ok else "FAIL ❌")

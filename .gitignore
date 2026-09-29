@@ -13,6 +13,8 @@ douyin_credentials.yaml
 
 # ---- 本机临时调试脚本（含硬编码本地路径）----
 _inspect_tmp*.py
+_autochain.sh
+_*.log
 
 # ---- Python 运行产物 ----
 __pycache__/
@@ -27,3 +29,4 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+.zcodeignore

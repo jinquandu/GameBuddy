@@ -10,7 +10,7 @@ server:
   ssh_alias: ecs            # ~/.ssh/config 里的别名（push/pull 走 rsync over ssh）
   remote_root: /opt/dashijie-eval-data   # 服务端稳定数据根（部署包外，更新不删）
   container: dashijie-eval  # 服务端跑 toolbox 的容器（push 触发 import/eval 用）
-  site_url: https://95188.pw/eval/
+  site_url: http://8.133.251.179/eval/
   keep_sessions: 3          # 服务端 prune 默认保留最近 N 个会话
 
 # ---- B站直播录制（toolbox record）----
@@ -55,7 +55,7 @@ pickup:                  # 拾取会话链路（python3 -m toolbox pickups / psc
   look_back: 35          # 岛首事件前小扫描秒数（覆盖开箱-翻看-首拾）
   look_fwd: 15           # 岛末事件后小扫描秒数
   max_sec: 90            # 单会话片段封顶秒数（超长整理会话截断）
-  scan_workers: 5        # 岛屿小扫描并行进程数（每进程限 2 线程）
+  scan_workers: 5        # 岛屿小扫描并行进程数（每进程限 2 线程；另有 GPU worker 混部）
 
 # ---- 2. 发布与反馈 ----
 # 2026-09-15 决策：不做自动发布（openapi 需企业资质；browser 自动化实证被
@@ -73,9 +73,21 @@ stats:
 
 # ---- 逐帧行为识别（python3 -m toolbox detect）----
 detector: {}              # 空字典；裸写 `detector:`（子项全注释）会解析成 null
-  # ocr_use_cuda: false   # OCR 走 GPU（默认关）。需 onnxruntime-gpu(CUDA12版)+
-  #                       # CUDA版torch；2026-09-18 RTX3070Ti 同素材实测反而慢
-  #                       # 43%（245s vs 350s），提速请优先用 --workers 并行
+  # workers: 0            # detect 分段并行 CPU worker 数；0=自动（>=5min 分片
+  #                       # 取 min(6, 核数/4)，短分片串行）。CLI --workers 优先
+  # gpu_workers: 2        # CUDA worker 数（detect 走 ocr_gpu 批量引擎 ~6.7 帧/s/
+  #                       # worker，pickups 走逐帧 CUDA 混部）；0=关。
+  #                       # 需 onnxruntime-gpu + CUDA 版 torch
+  # band_scale: 1.0       # 信息带降采样（0.8 单帧快 ~35% 但实测整体不提速、
+  #                       # 丢 ~4 条边缘事件，仅召回不敏感场景使用）
+  # ocr_use_cuda: false   # OCR 全走 GPU（默认关，单进程反而慢；提速请用
+  #                       # workers/gpu_workers 混部并行，见 README 性能节）
+  # loadout_enabled: true # 入局装备识别（干员/职业/主武器，围绕 match_start
+  #                       # 补扫大厅+落地两窗，已并行化）
+  # operator_class:       # 干员→职业映射（随赛季更新，可覆盖/扩充 OCR 别名）
+  #   红狼: 突击
+  # weapon_type:          # 枪械→类别映射（未收录的保留原名、类别留空）
+  #   SCAR-H: 突击步枪
   # dance_keywords: [跳舞, 舞动, 热舞]   # 跳舞 HUD 提示词（待实测校准）
   # price_table:                        # 高价值物品估价（哈夫币，参考价可覆盖）
   #   曼德尔砖: 3500000

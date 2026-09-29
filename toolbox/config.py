@@ -46,8 +46,15 @@ DEFAULTS = {
         # ---- B站直播录制（toolbox/recorder.py，python3 -m toolbox record）----
         "qn": 10000,         # 画质档：10000=原画(1080P)；房间不支持时自动降最高可用档
         "segment_min": 30,   # 单分片时长（分钟），到点轮转，P 号延续
-        "stall_sec": 20,     # 录制无数据超时（秒），判定断流重拉直链续录
+        "stall_sec": 20,     # 无数据超时（秒），判定断流重拉直链续录
         "poll_sec": 30,      # watch 模式未开播时的轮询间隔（秒）
+    },
+    "screenrec": {
+        # ---- 桌面录制（toolbox/screenrec.py，pet 卡「录桌面」按钮）----
+        "fps": 30,           # 采集帧率（gdigrab）
+        "crf": 23,           # x264 质量（小=清晰大=省空间）
+        "segment_min": 15,   # 单分P分钟数，到点轮转，P 号延续
+        "mic": False,        # True 时把默认麦克风混录进音轨（系统声音始终录）
     },
     "server": {
         # ---- 应用端 <-> 服务端（ECS）搬运配置，见 toolbox/transfer.py ----
@@ -55,7 +62,7 @@ DEFAULTS = {
         "remote_root": "/opt/dashijie-eval-data", # 服务端稳定数据根（部署包外，更新不删）
         "tenant": "default",                       # 租户（多租户方案A：数据按租户分前缀）
         "container": "dashijie-eval",              # 服务端跑 toolbox 的容器名
-        "site_url": "https://95188.pw/eval/",     # 打标站地址
+        "site_url": "http://8.133.251.179/eval/", # 打标站地址（域名失效，改公网 IP）
         "keep_sessions": 3,                       # 服务端保留最近 N 个会话（prune 默认值）
     },
 }

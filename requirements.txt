@@ -14,3 +14,6 @@ rapidocr-onnxruntime>=1.3
 # 混剪渲染叠加文字/封面（toolbox/remix.py）与发布文案模板（publish.json）
 pillow>=10.0
 jinja2>=3.1
+
+# 桌面录制系统声音回采（toolbox/screenrec.py；缺它降级纯视频）
+soundcard>=0.4.2

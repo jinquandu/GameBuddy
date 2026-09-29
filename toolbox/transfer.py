@@ -29,17 +29,14 @@ from datetime import datetime
 from pathlib import Path
 
 from toolbox.config import DATA, REMIXES, REPORTS, load_config
+from toolbox.naming import slug as _slug
 
 # 端侧<->服务端契约版本：与 docs/SERVER-INTERFACE.md 同步维护（先改文档再改
 # 此值）；写入 manifest.json 供服务端检测端侧契约版本。分级见契约文档 §0。
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.1.1"
 
 
 # ---------------------------------------------------------------- 会话发现
-
-def _slug(s, limit=40):
-    from toolbox.knockdown import _slug as _k
-    return _k(s, limit)
 
 
 def _canonical_rpt(video: Path):
@@ -76,7 +73,7 @@ def _find_events_rpt(video: Path):
 def discover_session(session):
     """按各链路既定命名规则聚拢一个场次的所有产物（缺失项为 None/[]）。"""
     from toolbox.asr import find_transcript_dir
-    from toolbox.knockdown import collect_videos
+    from toolbox.events import collect_videos
     target = Path(session).expanduser()
     videos = collect_videos(session)
     session_name = (videos[0].parent.name if len(videos) > 1 or target.is_dir()
@@ -238,14 +235,18 @@ def _mkdir(alias, remote_dir, dry=False):
 EVAL_EXCLUDES = {
     "asr": ("audio_16k.wav", "*.log"),
     "knockdowns": ("l2/", "_frames/", "review.html", "scores.json"),
-    "pickups": ("l2/", "_frames/", "review.html", "scores.json", "_scancache.json"),
+    # _scancache/_lobbycache 是端侧小扫描断点缓存（服务端可重建，不上送；
+    # _lobbycache 为 2026-09-22 补漏——此前已实际上送违反契约 §5 排除原则）
+    "pickups": ("l2/", "_frames/", "review.html", "scores.json",
+                "_scancache.json", "_lobbycache.json"),
     "voice": ("review.html",),
 }
 
 
 def _tenant_root(cfg, tenant=None):
     """多租户方案A：数据按 /opt/dashijie-eval-data/tenants/<租户>/ 分前缀。"""
-    t = tenant if tenant is not None else cfg.get("tenant", "default")
+    raw = tenant if tenant is not None else cfg.get("tenant", "default")
+    t = str(raw).strip()   # YAML 会把 007 解析成 int，统一转字符串
     if not t or not re.match(r"^[A-Za-z0-9_-]{1,32}$", t):
         raise ValueError(f"租户名不合法: {t!r}（仅限字母数字-_，≤32 字）")
     return f"{cfg['remote_root']}/tenants/{t}"

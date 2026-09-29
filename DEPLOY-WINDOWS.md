@@ -2,7 +2,7 @@
 
 端侧 = 识别全链：`download → asr → speaker → detect → knockdowns → pickups
 → voice → pipeline → push/pull`。评估打标、打分合并、混剪在服务端（打标站
-https://95188.pw/eval/ ），本包不含这些命令——执行会提示「命令不可用」属正常。
+http://8.133.251.179/eval/ ），本包不含这些命令——执行会提示「命令不可用」属正常。
 
 ## 0. 前置清单
 

@@ -150,7 +150,7 @@ def transcribe_part(video: Path, model, out_root: Path = None):
 def asr(target):
     """链路入口：场次目录（P1..PN 分片）/ 单个视频文件 -> 逐分片转写。
     模型只加载一次，多分片复用。返回本轮新转写的 asr 目录列表。"""
-    from toolbox.knockdown import collect_videos
+    from toolbox.events import collect_videos
     videos = collect_videos(target)
     print(f"ASR 转写：{len(videos)} 个分片（模型加载一次，逐分片转写）")
     model = _load_model()

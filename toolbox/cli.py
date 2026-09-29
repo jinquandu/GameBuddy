@@ -146,8 +146,9 @@ def cmd_pscore(args):
 def cmd_report(args):
     import re as _re
     from pathlib import Path as _P
-    from toolbox.report import build_matches, render_report
+    from toolbox.chrono import build_matches
     from toolbox.remix import discover_pool
+    from toolbox.report import render_report
     pool = discover_pool()
     matches = build_matches(pool)
     if not matches:
@@ -175,6 +176,12 @@ def cmd_pet(args):
             f"宠物客户端需要 tkinter（本 Python 缺失：{e}）。"
             "用 python.org 官方安装包重装/修复 Python，或换完整版解释器。") from e
     run(address=args.address)
+
+
+def cmd_screenrec(args):
+    from toolbox.screenrec import record
+    record(out_dir=args.out, cfg={"segment_min": args.segment_min,
+                                  "mic": args.mic})
 
 
 def cmd_detect(args):
@@ -256,6 +263,18 @@ def build_parser():
     sp.add_argument("--probe", action="store_true",
                     help="只探测房间状态与实际画质，不录制")
     sp.set_defaults(func=cmd_record)
+
+    sp = sub.add_parser(
+        "screenrec",
+        help="【应用端】桌面录制：屏幕+系统声音（soundcard loopback），"
+             "按日期产出场次目录/分P，可直接 pipeline")
+    sp.add_argument("--out", default=None,
+                    help="录像根目录（默认 video/，1级=日期场次目录，2级=分P）")
+    sp.add_argument("--segment-min", type=float, default=None,
+                    help="单分P分钟数（默认取配置 screenrec.segment_min=15）")
+    sp.add_argument("--mic", action="store_true",
+                    help="把默认麦克风混录进音轨（默认只录系统声音）")
+    sp.set_defaults(func=cmd_screenrec)
 
     sp = sub.add_parser(
         "download", help="【应用端】B站视频/分P下载（1080P avc1，断点续传，产出场次目录）")
@@ -352,15 +371,16 @@ def build_parser():
     sp.add_argument("video_id")
     sp.set_defaults(func=cmd_stats)
 
-    sp = sub.add_parser("detect", help="逐帧行为识别：击倒/拾取/撤离/跳舞 -> 事件流 JSONL")
+    sp = sub.add_parser("detect", help="逐帧行为识别：进入对局/入局装备/击倒/拾取/撤离 -> 事件流 JSONL")
     sp.add_argument("video_id", help="已登记视频 id 或视频文件路径")
     sp.add_argument("--fps", type=float, default=1.0, help="采样帧率（默认 1）")
     sp.add_argument("--out", default=None, help="输出 JSONL 路径")
     sp.add_argument("--transcript", default=None,
                     help="ASR 转写 json（如 data/asr/p3/transcript.json），"
                          "用于拾取估价的语音交叉")
-    sp.add_argument("--workers", type=int, default=1,
-                    help="并行进程数（分段并行；0=自动 CPU-1）。默认 1 串行")
+    sp.add_argument("--workers", type=int, default=None,
+                    help="并行进程数（分段并行；默认自动：>=5min 分片 "
+                         "min(10, 核数/2)，短分片串行；限每进程 2 OCR 线程)")
     sp.add_argument("-v", "--verbose", action="store_true", help="打印进度")
     sp.set_defaults(func=cmd_detect)
 
@@ -397,7 +417,7 @@ def build_parser():
     sp.add_argument("--redetect", action="store_true",
                     help="忽略已有事件流，全部重新检测")
     sp.add_argument("--fps", type=float, default=1.0, help="检测采样帧率（默认 1）")
-    sp.add_argument("--workers", type=int, default=1,
+    sp.add_argument("--workers", type=int, default=None,
                     help="检测并行进程数（0=自动 CPU-1）")
     sp.set_defaults(func=cmd_knockdowns)
 
@@ -423,7 +443,7 @@ def build_parser():
     sp.add_argument("--redetect", action="store_true",
                     help="忽略已有事件流，全部重新检测")
     sp.add_argument("--fps", type=float, default=1.0, help="检测采样帧率（默认 1）")
-    sp.add_argument("--workers", type=int, default=1,
+    sp.add_argument("--workers", type=int, default=None,
                     help="检测并行进程数（0=自动 CPU-1）")
     sp.set_defaults(func=cmd_pickups)
 
