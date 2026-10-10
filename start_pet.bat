@@ -1,14 +1,15 @@
 @echo off
-rem dashijie desktop pet launcher (avoids the Microsoft Store python stub)
+rem dashijie desktop pet launcher (windowless: no persistent console)
+rem pyw/pythonw = 无控制台解释器；start "" = 脱离启动，本窗口闪退即走
 cd /d "%~dp0"
-where py >nul 2>nul
+where pyw >nul 2>nul
 if %errorlevel%==0 (
-  py -3 -X utf8 -m toolbox pet
+  start "" pyw -3 -X utf8 -m toolbox pet
   goto :end
 )
-where python >nul 2>nul
+where pythonw >nul 2>nul
 if %errorlevel%==0 (
-  python -X utf8 -m toolbox pet
+  start "" pythonw -X utf8 -m toolbox pet
   goto :end
 )
 echo [ERROR] No Python launcher found. Install from https://www.python.org/downloads/
