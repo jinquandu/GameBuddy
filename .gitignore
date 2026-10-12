@@ -22,6 +22,11 @@ __pycache__/
 venv/
 *.egg-info/
 
+# ---- PyInstaller exe 打包产物（build_exe.bat 生成）----
+build/
+dist/
+*.spec
+
 # ---- 系统/编辑器 ----
 Thumbs.db
 .DS_Store

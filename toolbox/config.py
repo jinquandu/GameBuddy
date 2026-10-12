@@ -11,11 +11,16 @@ config.yaml（可选）与 config.example.yaml 同级，用户配置深度覆盖
 """
 import copy
 import os
+import sys
 from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
+# PyInstaller 冻结形态：源码在临时解包目录，项目根（config.yaml/video/data
+# 的锚点）必须是 exe 所在目录，便携布局随文件夹整体分发
+ROOT = (Path(sys.executable).resolve().parent
+        if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent.parent)
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 FONTS_DIR = Path(__file__).resolve().parent / "fonts"

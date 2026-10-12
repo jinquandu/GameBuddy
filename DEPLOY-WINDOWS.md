@@ -52,6 +52,20 @@ copy config.example.yaml config.yaml      # server.tenant 按租户改
 B 站下载还需 `bilibili_cookies.txt`（Netscape 格式，从浏览器导出，放包根目录，
 **不要发给别人**）。
 
+### 2b. exe 版（核心版，免装 Python）
+
+不想装 Python/venv 的机器用这个：开发机跑 `build_exe.bat`（需
+`pip install pyinstaller`），产物 `dist\DashijiePet\`（约 550MB）——
+**整个文件夹**拷给目标机，`config.yaml` 放 exe 同级，双击
+`DashijiePet.exe` 即出桌宠小窗。
+
+- 布局便携：video/、data/、config.yaml 都锚定 exe 所在目录；
+- 内容 = 核心版（OCR 击倒/拾取/push 全可用），ASR 语音线未打包，
+  跑链自动跳过 asr/speaker/voice（日志有提示）；要语音线走源码仓安装；
+- exe 也是 CLI 直通：`DashijiePet.exe pipeline <地址> …`、
+  `DashijiePet.exe record 123 --once` 等价 `python -m toolbox …`；
+- 打包排除表与原理见 build_exe.bat 注释；重复打包直接再跑一遍 bat。
+
 ## 3. 首次链路（walkthrough）
 
 ```powershell

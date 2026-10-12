@@ -92,7 +92,7 @@ def run_pipeline(target, config=None, skip=(), run_eval=False):
         # 否则下面的 speaker/voice 会遍历空映射静默空转（还照常打印「完成」）
         from toolbox.asr import find_transcript_dir
         asr_dirs = {v.name: find_transcript_dir(v) for v in videos}
-        missing = [v.name for v, d in asr_dirs.items() if not d]
+        missing = [v for v, d in asr_dirs.items() if not d]   # 键已是分片名
         if missing:
             shown = "、".join(missing[:3]) + ("…" if len(missing) > 3 else "")
             print(f"[pipeline] 警告：{len(missing)}/{len(videos)} 个分片无已有"

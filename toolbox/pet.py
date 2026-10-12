@@ -372,7 +372,11 @@ class PetWindow(tk.Tk):
         self._last_addr = addr
         self._hide_status()
         self._set_state("run", f"开跑：{Path(addr).name[:26]}")
-        args = [sys.executable, "-X", "utf8", "-m", "toolbox", "pipeline", addr]
+        if getattr(sys, "frozen", False):         # exe 形态：自身即 CLI 入口
+            args = [sys.executable, "pipeline", addr]
+        else:
+            args = [sys.executable, "-X", "utf8", "-m", "toolbox",
+                    "pipeline", addr]
         if skip:
             args += ["--skip", *skip]
         if self.run_eval_var.get():
