@@ -26,6 +26,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from toolbox import proc
 from toolbox.config import DATA, ROOT, load_config
 from toolbox.logs import get as _get_log
 
@@ -401,7 +402,8 @@ class PetWindow(tk.Tk):
         if self.proc and self.proc.poll() is None:
             if os.name == "nt":     # pipeline 会再派生 ffmpeg/扫描子进程
                 subprocess.run(["taskkill", "/PID", str(self.proc.pid),
-                                "/T", "/F"], capture_output=True)
+                                "/T", "/F"], capture_output=True,
+                               creationflags=proc.NO_WINDOW)
             else:
                 self.proc.terminate()
 

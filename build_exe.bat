@@ -7,6 +7,10 @@ cd /d "%~dp0"
 py -3 -m PyInstaller --noconfirm --clean --windowed --name DashijiePet ^
   --collect-data rapidocr_onnxruntime ^
   --hidden-import pystray._win32 ^
+  --hidden-import toolbox._scan_worker ^
+  --hidden-import toolbox._loadout_batch_worker ^
+  --hidden-import toolbox._pickup_scan_batch_worker ^
+  --hidden-import toolbox._lobby_batch_worker ^
   --exclude-module torch --exclude-module torchaudio --exclude-module torchvision ^
   --exclude-module funasr --exclude-module modelscope ^
   --exclude-module librosa --exclude-module numba --exclude-module llvmlite ^

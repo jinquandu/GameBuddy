@@ -49,7 +49,8 @@ def _cut(src, t0, t1, out: Path):
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-threads", "4",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
-                    "-movflags", "+faststart", str(out)], check=True)
+                    "-movflags", "+faststart", str(out)], check=True,
+                   creationflags=proc.NO_WINDOW)
 
 
 def knockdowns(target, config=None, pre=None, post=None, merge=None,

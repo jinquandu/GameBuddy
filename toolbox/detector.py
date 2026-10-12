@@ -694,6 +694,7 @@ def _scan_loadouts_parallel(path, starts, op_class, wpn_type):
     import sys
     import tempfile
     from toolbox.config import ROOT
+    from toolbox import proc
     tmpdir = tempfile.mkdtemp(prefix="toolbox_loadout_")
     env = dict(os.environ, PYTHONPATH=str(ROOT))
     tables = json.dumps({"operator_class": op_class, "weapon_type": wpn_type})
@@ -701,12 +702,13 @@ def _scan_loadouts_parallel(path, starts, op_class, wpn_type):
     try:
         for i, ts in enumerate(starts):
             out_json = os.path.join(tmpdir, f"lo_{ts:.0f}.json")
-            cmd = [sys.executable, "-m", "toolbox._loadout_batch_worker",
-                   str(path), f"{ts}", tables, out_json]
+            cmd = proc.module_cmd("toolbox._loadout_batch_worker",
+                                  str(path), f"{ts}", tables, out_json)
             # 干员/枪械 ROI 小图 OCR 走 GPU 单帧更快且不占 CPU 核；
             # 奇数号保持 CPU（GPU 显存/上下文有限，一半足够）
             env_w = dict(env, TOOLBOX_OCR_CUDA="1") if i % 2 == 0 else env
-            procs.append((subprocess.Popen(cmd, env=env_w), out_json, ts))
+            procs.append((subprocess.Popen(cmd, env=env_w,
+                              creationflags=proc.NO_WINDOW), out_json, ts))
         metas = {}
         for p, o, ts in procs:
             ok = p.wait() == 0
@@ -726,10 +728,12 @@ def _scan_loadouts_parallel(path, starts, op_class, wpn_type):
 
 def _video_duration(path):
     """ffprobe 读视频时长（秒）。"""
+    from toolbox import proc
     import subprocess
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                         "format=duration", "-of", "csv=p=0", str(path)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True,
+                       creationflags=proc.NO_WINDOW)
     return float(r.stdout.strip())
 
 
@@ -810,6 +814,7 @@ def scan_video(path, fps=1.0, config=None, progress=None, transcript=None,
         import sys
         import tempfile
         from toolbox.config import ROOT
+        from toolbox import proc
         dur = _video_duration(path)
         # 混合并行：gpu_workers 个 CUDA worker（不占 CPU 核）+ workers 个 CPU
         # worker；实测 4 CPU + 3 CUDA 聚合 ~6.6 帧/s（纯 CPU 上限 ~4.5）。
@@ -834,12 +839,13 @@ def scan_video(path, fps=1.0, config=None, progress=None, transcript=None,
                 t_lo = max(0.0, t_start - SEG_WARMUP)   # 预热区间
                 t_hi = t_edge
                 out_json = os.path.join(tmpdir, f"part{i}.json")
-                cmd = [sys.executable, "-m", "toolbox._scan_worker",
-                       str(path), f"{t_lo}", f"{t_hi}", f"{fps}",
-                       pack_json, out_json, f"{t_start}"]
+                cmd = proc.module_cmd("toolbox._scan_worker",
+                                     str(path), f"{t_lo}", f"{t_hi}", f"{fps}",
+                                     pack_json, out_json, f"{t_start}")
                 env_w = dict(env, TOOLBOX_OCR_CUDA="1", TOOLBOX_OCR_BATCH="1") \
                     if i < gpu_w else env
-                procs.append((subprocess.Popen(cmd, env=env_w), out_json))
+                procs.append((subprocess.Popen(cmd, env=env_w,
+                              creationflags=proc.NO_WINDOW), out_json))
             raw = []
             for p, o in procs:
                 if p.wait() != 0:

@@ -46,6 +46,7 @@ from toolbox.events import (collect_videos, events_for, events_for_pickup,
                             part_no)
 from toolbox.knockdown import _cut
 from toolbox.naming import mmss as _mmss, slug as _slug
+from toolbox import proc
 
 NEAR_DOWN_SEC = 25.0    # 段首前该窗口内有击倒视为「击杀后舔包/敌人盒」
 # 自己容器列小条（1080p 全帧 OCR 实测标定：口袋/背包/安全箱 计数文字区）
@@ -117,7 +118,8 @@ def scan_ui_sessions(path, t_lo, t_hi, fps=1.0):
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
                         "-show_entries", "stream=width,height",
                         "-of", "csv=p=0", str(path)],
-                       capture_output=True, text=True, check=True)
+                       capture_output=True, text=True, check=True,
+                       creationflags=proc.NO_WINDOW)
     w, h = (int(x) for x in r.stdout.strip().split(","))
     x0f, x1f, y0f, y1f = CONTAINER_STRIP
     cw, ch = int(w * (x1f - x0f)), int(h * (y1f - y0f))
@@ -126,7 +128,8 @@ def scan_ui_sessions(path, t_lo, t_hi, fps=1.0):
          "-ss", f"{max(0.0, t_lo):.2f}", "-to", f"{t_hi:.2f}", "-i", str(path),
          "-vf", f"fps={fps},crop={cw}:{ch}:{int(w * x0f)}:{int(h * y0f)}",
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
-        capture_output=True, check=True)
+        capture_output=True, check=True,
+        creationflags=proc.NO_WINDOW)
     buf = np.frombuffer(p.stdout, dtype=np.uint8)
     n = len(buf) // (cw * ch * 3)
 
@@ -218,7 +221,8 @@ def _lobby_check(video, t0, t1, ocr=None, max_frames=LOBBY_MAX_FRAMES):
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
                         "-show_entries", "stream=width,height",
                         "-of", "csv=p=0", str(video)],
-                       capture_output=True, text=True, check=True)
+                       capture_output=True, text=True, check=True,
+                       creationflags=proc.NO_WINDOW)
     w, h = (int(x) for x in r.stdout.strip().split(","))
     # 只解码顶部菜单带（开始游戏/交易行/改枪台实测 cy≈0.05，2026-09-21）：
     # 整帧 OCR 1280x720 每帧 1-2s，顶部 0-15% 高×70% 宽提速 ~10x
@@ -228,7 +232,8 @@ def _lobby_check(video, t0, t1, ocr=None, max_frames=LOBBY_MAX_FRAMES):
          "-ss", f"{t0:.2f}", "-to", f"{t1:.2f}", "-i", str(video),
          "-vf", f"fps={fps:.4f},crop={cw}:{ch}:0:0",
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
-        capture_output=True, check=True)
+        capture_output=True, check=True,
+        creationflags=proc.NO_WINDOW)
     buf = np.frombuffer(p.stdout, dtype=np.uint8)
     if buf.size == 0:
         return False
@@ -278,10 +283,10 @@ def _batch_parallel(worker_module, fixed_args, jobs, n_workers, on_row,
             of = jf.replace("jobs_", "out_")
             Path(jf).write_text(json.dumps(q, ensure_ascii=False),
                                 encoding="utf-8")
-            cmd = [sys.executable, "-m", worker_module,
-                   *[str(a) for a in fixed_args], jf, of]
+            cmd = proc.module_cmd(worker_module, *fixed_args, jf, of)
             env_w = dict(env, TOOLBOX_OCR_CUDA="1") if idx < gpu_workers else env
-            running.append([subprocess.Popen(cmd, env=env_w), of, 0])
+            running.append([subprocess.Popen(cmd, env=env_w,
+                          creationflags=proc.NO_WINDOW), of, 0])
         while running:
             time.sleep(1.0)
             for item in running[:]:
@@ -439,7 +444,8 @@ def _session_label(evlist, price_table):
 def _clip_bad(clip: Path) -> bool:
     """解码级完整性自检（ffmpeg -v error 全流读一遍，坏文件会报 NAL 错）。"""
     r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(clip),
-                        "-f", "null", "-"], capture_output=True, text=True)
+                        "-f", "null", "-"], capture_output=True, text=True,
+                       creationflags=proc.NO_WINDOW)
     return r.returncode != 0 or bool(r.stderr.strip())
 
 

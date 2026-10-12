@@ -21,6 +21,8 @@ host 句；audio_16k.wav 是唯一必需音源——源视频已删的场次也�
 --html 汇总全部场次生成 data/voice/review.html（风格同击倒 review）。
 """
 import json
+
+from toolbox import proc
 import random
 import re
 import subprocess
@@ -107,7 +109,8 @@ def resolve_asr(target):
         print("  提取 audio_16k.wav ...")
         subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error",
                         "-i", game, "-vn", "-ac", "1", "-ar", str(SR),
-                        "-acodec", "pcm_s16le", "-y", str(audio)], check=True)
+                        "-acodec", "pcm_s16le", "-y", str(audio)], check=True,
+                       creationflags=proc.NO_WINDOW)
     return meta, sents, audio
 
 
@@ -548,7 +551,8 @@ def _cut_audio(audio_path, t0, t1, out):
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                     "-ss", f"{t0:.2f}", "-i", str(audio_path),
                     "-t", f"{t1 - t0:.2f}", "-c:a", "aac", "-b:a", "96k",
-                    str(out)], check=True)
+                    str(out)], check=True,
+                   creationflags=proc.NO_WINDOW)
 
 
 # ---------------------------------------------------------------- HTML

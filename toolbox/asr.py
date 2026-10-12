@@ -11,6 +11,8 @@ ModelScope 自动下载（~1GB，缓存 ~/.cache/modelscope）。逐句时间戳
 移植自 bilibili-highlight-extractor skill 的 transcribe.py（分句算法原样保留）。
 """
 import json
+
+from toolbox import proc
 import re
 import subprocess
 from pathlib import Path
@@ -26,7 +28,8 @@ def _slug(s, n=48):
 def to_wav16k(video: Path, out: Path):
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(video),
                     "-vn", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le",
-                    "-y", str(out)], check=True)
+                    "-y", str(out)], check=True,
+                   creationflags=proc.NO_WINDOW)
 
 
 # ---------------------------------------------------------------- 分句（与 skill 版一致）

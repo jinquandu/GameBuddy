@@ -135,7 +135,8 @@ def _ssh(alias, remote_cmd, check=True):
         if native.exists():
             bin_ = str(native)
     return subprocess.run([bin_, alias, remote_cmd],
-                          check=check, text=True, capture_output=True)
+                          check=check, text=True, capture_output=True,
+                          creationflags=proc.NO_WINDOW)
 
 
 _RSYNC_CACHE = {}
@@ -155,7 +156,8 @@ def _rsync_tool():
         for flag in ("--secluded-args", "--protect-args"):
             try:
                 r = subprocess.run([c, flag, "--version"],
-                                   capture_output=True, timeout=10)
+                                   capture_output=True, timeout=10,
+                                   creationflags=proc.NO_WINDOW)
             except Exception:
                 break
             if r.returncode == 0:
@@ -207,7 +209,8 @@ def _rsync(src: str, dst: str, excludes=(), dry=False):
                    RSYNC_RSH=(f"ssh -F {home}/.ssh/config "
                               f"-o UserKnownHostsFile={home}/.ssh/known_hosts"))
         env["PATH"] = str(Path(rsbin).parent) + os.pathsep + env.get("PATH", "")
-    r = subprocess.run(cmd, env=env)
+    r = subprocess.run(cmd, env=env,
+                       creationflags=proc.NO_WINDOW)
     if r.returncode != 0:
         raise RuntimeError(f"rsync 失败（退出码 {r.returncode}）：{src} -> {dst}")
 

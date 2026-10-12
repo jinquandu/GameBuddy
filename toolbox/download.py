@@ -17,6 +17,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from toolbox import proc
 from toolbox.config import ROOT, load_config
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -148,7 +149,8 @@ def download(url_or_bvid, parts="all", out_dir=None):
         fetch(audio["baseUrl"], fa)
         print(f"  音频完成 {fa.stat().st_size/1e6:.0f}MB", flush=True)
         r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(fv), "-i", str(fa),
-                            "-c", "copy", "-movflags", "+faststart", str(out)])
+                            "-c", "copy", "-movflags", "+faststart", str(out)],
+                           creationflags=proc.NO_WINDOW)
         fv.unlink(missing_ok=True)
         fa.unlink(missing_ok=True)
         if r.returncode != 0:
