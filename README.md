@@ -37,8 +37,9 @@ B站视频 ──download┴─→ video/<场次>/ ─→ asr ─→ speaker ─
 
 ```
 ├── config.yaml               # 用户配置（从 config.example.yaml 复制后改）
-├── requirements.txt          # 共用核心依赖
-├── requirements-client.txt   # 端侧完整依赖（含 torch/funasr 等，3-5GB）
+├── requirements.txt          # 共用核心依赖（核心版仅此一份，~0.6GB）
+├── requirements-asr.txt      # 语音线可选依赖（asr/speaker/voice；不装自动跳过）
+├── requirements-client.txt   # 端侧完整依赖 = 核心 + 语音线（聚合引用）
 ├── DEPLOY-WINDOWS.md         # Windows 部署与排查手册（必读）
 ├── docs/SERVER-INTERFACE.md  # 端侧↔服务端接口契约（接口变更必读必更新）
 ├── toolbox/                  # 全部代码
@@ -81,8 +82,11 @@ B站视频 ──download┴─→ video/<场次>/ ─→ asr ─→ speaker ─
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-# 基座（纯 CPU 链路，装机 ~2.0GB）：
-pip install -r requirements-client.txt
+# 核心版（录制/下载/OCR 击倒/拾取/push 评估，装机 ~0.6GB）：
+pip install -r requirements.txt
+# 语音线（asr/speaker/voice 三阶段，CPU 档共 ~2.0GB）——不装则 pipeline
+# 自动跳过这三阶段，其余不受影响；核心版先跑、后补装随时可启用：
+pip install -r requirements-asr.txt
 # 有 N 卡的机器加挂 GPU 档（双链路，装机共 ~5.5GB；detect 11min/70min片、
 # ASR 吃 CUDA；不装自动走 CPU 链路，同一份代码不用选包）：
 pip install -r requirements-gpu.txt
@@ -97,8 +101,8 @@ copy config.example.yaml config.yaml     # server.tenant 按租户改
 - PowerShell 执行 `$env:PYTHONUTF8=1` 避免中文日志 UnicodeEncodeError。
 
 首次 ASR 会从 ModelScope 自动下载 ~1GB 模型（缓存
-`~/.cache/modelscope`）。识别耗时（4 小时素材，i9-12900H 实测口径）：
-GPU 档 detect ~35min + pickups ~25min；纯 CPU 档约 2 倍。
+`~/.cache/modelscope`；核心版不装语音线则无此步）。识别耗时（4 小时素材，
+i9-12900H 实测口径）：GPU 档 detect ~35min + pickups ~25min；纯 CPU 档约 2 倍。
 
 ## 快速开始
 

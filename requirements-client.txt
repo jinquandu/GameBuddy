@@ -1,34 +1,16 @@
-# 应用端（Windows/Mac）完整依赖 = 核心全部 + ASR/说话人/语音线（CPU 基座）
+# 应用端（Windows/Mac）完整依赖 = 核心 + 语音线（CPU 基座）
 # 安装：pip install -r requirements-client.txt          # 纯 CPU，装机 ~2.0GB
 #       pip install -r requirements-client.txt -r requirements-gpu.txt
 #                                                        # 双链路，装机 ~5.5GB
+#
+# 核心版（不要语音三线 asr/speaker/voice 时）：只装 requirements.txt（~0.6GB），
+# pipeline 自动跳过语音阶段，OCR 击倒/拾取/push 评估不受影响；
+# 后补语音线随时可装 requirements-asr.txt（本文件 = 核心 + 该文件）。
+#
 # 两套链路同一份代码：GPU 依赖缺失时 ocr_gpu 自动回退 CPU 路径，
 # 不需要按机器选包——有 N 卡的机器装 GPU 档即可。
 -r requirements.txt
-
-# ASR 转写（toolbox/asr.py 应用端节点 2；模型首次运行从 ModelScope 自动下载 ~1GB）
-funasr>=1.1
-modelscope>=1.15
-# funasr 特征提取的 fbank 后端（2026-09-18 Windows 全新安装实证必需；
-# torchaudio 亦可，但需与 torch 版本严格配对，knf 更省事）
-kaldi-native-fbank
-
-# 说话人标注（toolbox/speaker.py 应用端节点 3：CAM++ 声纹 + 聚类）
-# torch/torchaudio 必须成对（modelscope 声纹管道硬依赖 torchaudio）；
-# 2026-09-18 Windows 实证：不锁版本会装到 torch 2.14（无配对 torchaudio），
-# 锁 2.11.0 对可用。Mac 端已有环境不受影响。
-torch==2.11.0
-torchaudio==2.11.0
-scikit-learn
-# modelscope speaker-verification pipeline 的隐藏依赖（2026-09-18 Windows
-# 全新安装实证缺失，import addict/datasets 报错）
-addict
-simplejson
-sortedcontainers
-datasets
-
-# 主播语音情绪评估（toolbox/voice.py 应用端节点 13 计算：RMS/基频 yin）
-librosa>=0.10
+-r requirements-asr.txt
 
 # OCR（rapidocr-onnxruntime 走 CPU EP）随 requirements.txt 核心；
 # GPU 提速见 requirements-gpu.txt（detect 批量引擎 + ASR 吃 CUDA）

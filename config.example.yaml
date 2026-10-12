@@ -5,6 +5,12 @@ paths:
   data_dir: data          # 数据根目录（相对项目根；服务端容器用 TOOLBOX_DATA_DIR
                            # 环境变量指到挂载点，优先级高于本项）
 
+# ---- 可选功能开关（依赖缺失时 pipeline 自动降级跳过对应阶段）----
+features:
+  asr: true               # 语音线（asr/speaker/voice）。核心版（只装
+                           # requirements.txt）保持 true 也会因缺依赖自动跳过；
+                           # 装了 requirements-asr.txt 后想临时关语音线可置 false
+
 # ---- 应用端 <-> 服务端（ECS）搬运，接口契约见 docs/SERVER-INTERFACE.md ----
 server:
   ssh_alias: ecs            # ~/.ssh/config 里的别名（push/pull 走 rsync over ssh）

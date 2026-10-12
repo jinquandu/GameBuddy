@@ -38,9 +38,16 @@ Expand-Archive dashijie-client-<日期>.zip -DestinationPath C:\tools\dashijie
 cd C:\tools\dashijie\dashijie-client-<日期>
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements-client.txt    # 含 torch/funasr/rapidocr 等，约 3-5GB
+# 核心版（录制/下载/OCR 击倒/拾取/push 评估，约 0.6GB）：
+pip install -r requirements.txt
+# 语音线（asr/speaker/voice，加起来约 2.0GB；不装则 pipeline 自动跳过
+# 这三阶段，其余不受影响，后补装随时启用）：
+pip install -r requirements-asr.txt
 copy config.example.yaml config.yaml      # server.tenant 按租户改
 ```
+
+两档安装对应的安装包体积：核心版 wheel 下载 ~150MB / 解压 ~0.6GB；
+补语音线再下载 ~0.5GB（GPU 档 torch 换 cu126 版另加 ~3GB）。
 
 B 站下载还需 `bilibili_cookies.txt`（Netscape 格式，从浏览器导出，放包根目录，
 **不要发给别人**）。
@@ -65,7 +72,8 @@ python -m toolbox push <场次目录> --mode video
 python -m toolbox pull --template single_best
 ```
 
-首次 ASR 会从 ModelScope 下载 ~1GB 模型（到 `%USERPROFILE%\.cache\modelscope`）。
+首次 ASR 会从 ModelScope 下载 ~1GB 模型（到 `%USERPROFILE%\.cache\modelscope`；
+核心版未装语音线则无此步）。
 识别重活很吃 CPU，4 小时素材预计 1.5-2 小时（Apple Silicon 约 1 小时内）。
 
 ## 4. 常见排查

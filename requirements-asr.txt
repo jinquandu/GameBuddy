@@ -1,0 +1,31 @@
+# 语音线可选依赖（asr/speaker/voice 三阶段）：funasr 转写 + CAM++ 说话人 +
+# librosa 情绪。不装本文件 = 核心版（~0.6GB）：录制/下载/OCR 击倒/拾取/
+# push 评估全可用，pipeline 自动跳过 asr/speaker/voice（日志有提示）。
+# 启用方式：pip install -r requirements-asr.txt（CPU 档 ~1.4GB；
+# 连同核心 requirements.txt 一起装即原「完整版」requirements-client.txt）
+
+# ASR 转写（toolbox/asr.py 应用端节点 2；模型首次运行从 ModelScope 自动下载 ~1GB）
+funasr>=1.1
+modelscope>=1.15
+# funasr 特征提取的 fbank 后端（2026-09-18 Windows 全新安装实证必需；
+# torchaudio 亦可，但需与 torch 版本严格配对，knf 更省事）
+kaldi-native-fbank
+
+# 说话人标注（toolbox/speaker.py 应用端节点 3：CAM++ 声纹 + 聚类）
+# torch/torchaudio 必须成对（modelscope 声纹管道硬依赖 torchaudio）；
+# 2026-09-18 Windows 实证：不锁版本会装到 torch 2.14（无配对 torchaudio），
+# 锁 2.11.0 对可用。Mac 端已有环境不受影响。
+torch==2.11.0
+torchaudio==2.11.0
+scikit-learn
+# modelscope speaker-verification pipeline 的隐藏依赖（2026-09-18 Windows
+# 全新安装实证缺失，import addict/datasets 报错）
+addict
+simplejson
+sortedcontainers
+datasets
+
+# 主播语音情绪评估（toolbox/voice.py 应用端节点 13 计算：RMS/基频 yin）
+librosa>=0.10
+
+# GPU 提速（ASR 吃 CUDA、torch 换 cu126 版）另见 requirements-gpu.txt

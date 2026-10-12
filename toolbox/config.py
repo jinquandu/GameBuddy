@@ -22,6 +22,12 @@ FONTS_DIR = Path(__file__).resolve().parent / "fonts"
 
 DEFAULTS = {
     "paths": {"data_dir": "data"},
+    "features": {
+        # ---- 可选功能开关（关或依赖未装时 pipeline 自动降级跳过对应阶段）----
+        "asr": True,   # 语音线（asr/speaker/voice 三阶段）。False 或未装
+                       # requirements-asr.txt 时 pipeline 整线跳过，
+                       # OCR 击倒/拾取/push 评估不受影响
+    },
     "highlight": {
         "method": "keyword",       # keyword=ASR+关键词；llm=大模型选段（后续）
         "preroll_sec": 0,

@@ -19,6 +19,23 @@ def _bvish(target):
     return bool(re.search(r"(BV[0-9A-Za-z]{10}|bilibili\.com)", target))
 
 
+def _voice_line_ready(config):
+    """语音三阶段（asr/speaker/voice）可用性，返回 (ok, 原因)。
+
+    features.asr 关闭，或 funasr/torch/torchaudio/sklearn/librosa 任一未安装
+    （核心版只装 requirements.txt）时整线不可用。用 find_spec 探测而非真
+    import：跑链每次探测不该白付 torch 的模块加载开销，也不触发缺包报错。
+    """
+    if not (config.get("features") or {}).get("asr", True):
+        return False, "features.asr=false"
+    import importlib.util
+    missing = [m for m in ("funasr", "torch", "torchaudio", "sklearn", "librosa")
+               if importlib.util.find_spec(m) is None]
+    if missing:
+        return False, "未装语音线依赖（" + "/".join(missing) + "）"
+    return True, ""
+
+
 def run_pipeline(target, config=None, skip=(), run_eval=False):
     """按阶段顺序跑，已有产物自动复用（各链路自身幂等）。返回各阶段耗时。"""
     from toolbox.config import load_config
@@ -48,6 +65,15 @@ def run_pipeline(target, config=None, skip=(), run_eval=False):
     videos = collect_videos(target)
     session = Path(target).name
     print(f"[pipeline] 场次：{session}，{len(videos)} 个分片")
+
+    # 语音线可用性：开关关或核心版缺依赖 -> asr/speaker/voice 整线自动跳过
+    # （OCR 击倒/拾取/push 不受影响）；用户显式 --skip 了则不重复提示。
+    vline, why = _voice_line_ready(config)
+    if not vline and not ({"asr", "speaker", "voice"} & skip):
+        skip |= {"asr", "speaker", "voice"}
+        print(f"[pipeline] 语音线未启用（{why}）：跳过 asr/speaker/voice；"
+              "pip install -r requirements-asr.txt 可启用（装好后 features.asr "
+              "保持 true 即可）", flush=True)
 
     asr_dirs = {}
 
