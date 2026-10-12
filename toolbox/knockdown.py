@@ -15,6 +15,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from toolbox import proc
 from toolbox.config import DATA, load_config
 from toolbox.detector import _video_duration
 # collect_videos/events_for 兼容转引：历史版本寄生在本模块，新代码请从

@@ -290,7 +290,7 @@ def _batch_parallel(worker_module, fixed_args, jobs, n_workers, on_row,
         while running:
             time.sleep(1.0)
             for item in running[:]:
-                proc, of, parsed = item
+                wproc, of, parsed = item     # 局部名避开模块 proc（遮蔽会炸 module_cmd）
                 if os.path.exists(of):
                     for line in open(of, encoding="utf-8").read().splitlines()[parsed:]:
                         try:
@@ -301,7 +301,7 @@ def _batch_parallel(worker_module, fixed_args, jobs, n_workers, on_row,
                         done.add(row.get("key"))
                         parsed += 1
                 item[2] = parsed
-                if proc.poll() is None:
+                if wproc.poll() is None:
                     continue
                 running.remove(item)
     finally:
