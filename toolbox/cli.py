@@ -475,8 +475,8 @@ def build_parser():
     sp.set_defaults(func=cmd_pipeline)
 
     sp = sub.add_parser(
-        "pet", help="【应用端】桌面宠物客户端：置顶小窗显示识别链进展，"
-                    "配置视频地址一键跑 pipeline")
+        "pet", help="【应用端】桌面宠物客户端（素朴小窗：录像地址+开始跑链；"
+                    "最小化驻留系统托盘）")
     sp.add_argument("--address", default="",
                     help="预填视频地址（BV 号/URL/场次目录）")
     sp.set_defaults(func=cmd_pet)

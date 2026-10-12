@@ -17,3 +17,5 @@ jinja2>=3.1
 
 # 桌面录制系统声音回采（toolbox/screenrec.py；缺它降级纯视频）
 soundcard>=0.4.2
+# 桌宠最小化驻留系统托盘（toolbox/pet.py；缺它退化为普通任务栏最小化）
+pystray>=0.19

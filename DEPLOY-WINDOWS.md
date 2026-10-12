@@ -64,7 +64,7 @@ python -m toolbox record 14735356 --probe          # 先探测画质/开播状�
 python -m toolbox pipeline "https://www.bilibili.com/video/BVxxxx" --run-eval
 python -m toolbox pipeline "video/<录制场次目录>"  # 录好的场次直接进识别链
 
-# 桌面宠物客户端：置顶小窗看全链进展 + 填视频地址一键开跑（等价上一条）
+# 桌面宠物客户端：素朴小窗（录像地址+开始跑链），最小化驻留系统托盘
 python -m toolbox pet
 
 # 打标完成、选中做片后，补传源片 + 收回成片

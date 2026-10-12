@@ -70,27 +70,36 @@ check("场次名与产物目录对得上",
       or (DATA / "knockdowns" / st["session"]).is_dir()
       or any(d.startswith(st["session"]) for d in vdirs))
 
-# ---- 3) GUI 冒烟：创建 -> 渲染 -> 收起 -> 展开 -> 空地址提示 -> 销毁 ----
+# ---- 3) GUI 冒烟：素朴小窗创建 -> 渲染 -> 空地址提示 -> 托盘往返 -> 销毁 ----
 try:
     win = PetWindow()
     check("窗口创建", True)
     win.update()
-    win._render()                      # 手动渲染一帧（阶段表/战绩条重绘）
-    win._refresh_idle_stats()
+    win._render()                      # 手动渲染一帧（状态行刷新）
     win.update()
-    check("战绩条文案", bool(win.loot_lab.cget("text").strip()))
-    check("阶段表 8 项", len(win.stage_labels) == 8)
-    win._toggle_collapse()
-    win.update()
-    check("收起", win.collapsed and win.winfo_height() <= 130)
-    win._toggle_collapse()
-    win.update()
-    check("展开", not win.collapsed and win.winfo_height() >= 400)
+    check("素朴主界面：地址框+主按钮映射中",
+          bool(win.addr_cb.winfo_ismapped()) and bool(win.btn.winfo_ismapped()))
+    check("主按钮文案", "开始跑链" in win.btn.cget("text"))
     # 地址校验分支（不真正起子进程）
     win.addr_var.set("")
     win._toggle_run()
     win.update()
     check("空地址提示", "地址" in win._status_text)
+    # 最小化 -> 托盘（withdraw，任务栏不占位）-> 恢复
+    win.iconify()
+    win.update()
+    win._to_tray()
+    win.update()
+    try:
+        import pystray
+        has_tray = True
+    except ImportError:
+        has_tray = False
+    check("最小化藏进托盘", win.wm_state() == "withdrawn"
+          and (win.tray is not None) == has_tray)
+    win._tray_show()
+    win.update()
+    check("托盘恢复窗口", win.wm_state() == "normal")
     win._save_hist()
     win.destroy()
     check("GUI 冒烟完成", True)
