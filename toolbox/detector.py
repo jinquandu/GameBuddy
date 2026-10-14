@@ -546,6 +546,10 @@ def _step_scan(cap, ocr, t_lo, t_hi, step_sec, rois, accept_box=None):
 def _scan_loadout(path, t_match, op_class, wpn_type):
     """围绕 match_start 时刻补扫本局干员与枪械，返回 meta dict（无命中字段为空）。
 
+    契约 1.2.0 关键字段：hero（干员名 str）+ weapons（枪械名 str 列表，首读
+    序）；另有 operator/operator_class/weapon_reads/primary_weapon* 等端侧
+    源数据字段（本地逐局表渲染用，服务端忽略）。
+
     大厅窗 [t-180, t-5]（5s 步进）：干员名卡（书法体，多帧投票）+ 切换播报
     条「出战干员切换为X」（印刷体，一锤定音权重 3，命中即止）。浅色皮肤名卡
     可直读（红狼），深色描金皮肤不可读属已知限制。
@@ -661,21 +665,25 @@ def _scan_loadout(path, t_match, op_class, wpn_type):
                      if v["reads"] >= 2 and wpn_type.get(k) == "近战"]
             guns = melee
         primary = guns[0] if guns else ""
-        # 武器列表只保留多帧读数（单帧多为贴纸残片/按键提示噪声）；
-        # 全是单帧时保留全部供排查
+        # 武器读数只认多帧稳定（单帧多为贴纸残片/按键提示噪声）；无稳定读数
+        # 时全量仅进 weapon_reads 供排障，不进契约 weapons 字段（服务端照单
+        # 展示，噪声不上送）
         stable_names = [k for k, v in wpn.items() if v["reads"] >= 2]
-        weapons = [{"name": k, "type": wpn_type.get(k, ""),
-                    "reads": wpn[k]["reads"]} for k in
-                   sorted(stable_names or wpn,
-                          key=lambda k: wpn[k]["first_t"])]
+        by_first = lambda k: wpn[k]["first_t"]
         # 置信度 = 已命中部分（干员 / 主武器）OCR 置信度的最小值
         parts = [op_conf] if operator else []
         if primary:
             parts.append(wpn[primary]["conf"])
         return {
-            "operator": operator,
+            # 契约 1.2.0 关键字段：服务端逐场报告消费（hero 取首条、weapons
+            # 并集保序）；其余为端侧本地渲染/排障的源数据字段，服务端可忽略
+            "hero": operator,
+            "weapons": sorted(stable_names, key=by_first),  # 稳定枪名（str，首读序）
+            "operator": operator,            # = hero（端侧本地逐局表沿用）
             "operator_class": op_class.get(operator, ""),
-            "weapons": weapons,
+            "weapon_reads": [{"name": k, "type": wpn_type.get(k, ""),
+                              "reads": wpn[k]["reads"]}
+                             for k in sorted(stable_names or wpn, key=by_first)],
             "primary_weapon": primary,
             "primary_weapon_type": wpn_type.get(primary, ""),
             "weapon_source": "tab" if tab_used else "hud",

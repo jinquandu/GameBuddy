@@ -34,7 +34,9 @@ from toolbox.naming import slug as _slug
 
 # 端侧<->服务端契约版本：与 docs/SERVER-INTERFACE.md 同步维护（先改文档再改
 # 此值）；写入 manifest.json 供服务端检测端侧契约版本。分级见契约文档 §0。
-CONTRACT_VERSION = "1.1.1"
+# 1.2.0：events.jsonl kind=loadout 补 meta.hero/weapons（REQ-20261014-002）；
+# 1.1.2/1.1.3 为逐场报告线补录与 site_url 迁移（2026-10-14 并轨编号，见 §8）。
+CONTRACT_VERSION = "1.2.0"
 
 
 # ---------------------------------------------------------------- 会话发现

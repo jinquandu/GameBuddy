@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 契约版本（CONTRACT_VERSION） | 1.1.1 |
+| 契约版本（CONTRACT_VERSION） | 1.2.0 |
 | 初版日期 | 2026-09-20 |
 | 权威源 | 端侧仓库 `docs/SERVER-INTERFACE.md`（服务端仓库同名文件为副本，变更时双端同步） |
 | 端侧实现 | `toolbox/transfer.py`（push/pull/import/sessions） |
@@ -90,7 +90,7 @@ data/remixes/（手动上传发布）
 | `remote_root` | `/opt/dashijie-eval-data` | 服务端稳定数据根（部署包外，更新不删） |
 | `tenant` | `default` | 租户名（多租户方案A） |
 | `container` | `dashijie-eval` | 服务端容器名 |
-| `site_url` | `http://8.133.251.179/eval/` | 打标站地址（人用，非机器接口；域名失效后统一改公网 IP，IP 变更时同步改此项） |
+| `site_url` | `http://8.153.157.239/eval/` | 打标站地址（人用，非机器接口；域名失效后统一改公网 IP，IP 变更时同步改此项） |
 | `keep_sessions` | `3` | prune 每租户保留最近 N 个会话 |
 
 ### 2.3 多租户与路径布局
@@ -107,6 +107,7 @@ data/remixes/（手动上传发布）
 │   ├── knockdowns/<场次slug>/   切片 mp4 + knockdowns.json
 │   ├── pickups/<场次slug>/      切片 mp4 + pickups.json
 │   ├── voice/<场次slug>/        m4a 切片 + voice_scores.json
+│   ├── game_reports/<场次slug>/ game_report.md（逐场报告，SRV-2 产）
 │   └── remixes/<模板名>/        成片 + cover.jpg + publish.json
 └── sessions/<场次>/
     ├── manifest.json         # 最近一次 push 的清单（端侧写，C2S-3）
@@ -123,6 +124,7 @@ data/remixes/（手动上传发布）
 | ASR 目录 | `slug(分片stem, ≤48)` | `data/asr/一字欧_叫我皮鞭_P1_20日10点18分/` |
 | 事件报告目录 | `slug(分片stem, ≤40) + "_full"` | `data/reports/…_P1_20日10点18分_full/` |
 | 击倒/拾取目录 | `slug(场次名, ≤60)` | `data/knockdowns/接直播跑刀…/` |
+| 逐场报告目录 | `slug(场次名, ≤60)`，与击倒/拾取同式 | `data/game_reports/接直播跑刀…/` |
 | 语音目录 | `slug(asr目录名, ≤40)` | `data/voice/接直播跑刀…_P1_18/` |
 
 ---
@@ -231,8 +233,12 @@ python3 -m toolbox import-session <场次> --remote-root <租户根>
 python3 -m toolbox eval <场次> [--no-html] --remote-root <租户根>
 ```
 
-评估链：击倒/拾取打分（合并 L2 人工标注）+ 逐局报告 + review 页。
-输出落服务端 data 树（`scores.json`、`review.html` 等），供打标站使用。
+评估链：击倒/拾取打分（合并 L2 人工标注）+ 逐场报告 + review 页。
+输出落服务端 data 树：`scores.json`、`review.html`，以及与击倒/拾取/语音
+平级的逐场报告 `data/game_reports/<场次slug>/game_report.md`（仅统计本
+场次事件，目录名登记进 `session.json` 的 `lines.report`），供打标站按
+场次作第四条线展示。逐局表含「干员」「枪械」两列（1.2.0 起取局窗口内
+`loadout` 事件：`meta.hero` 首条、`meta.weapons` 并集保序；缺失显示 `-`）。
 
 ### SRV-3 sessions（服务端运维命令）
 
@@ -242,8 +248,8 @@ python3 -m toolbox sessions [list|prune] [--keep N] [--tenant <t>]
 
 - `list`：按租户列出会话（imported_at、源片✓/仅评估包、占用、场次名）；
 - `prune`：每租户保留最近 N 个（默认 `server.keep_sessions`=3），连带删
-  该会话在 data 树的 asr/reports/knockdowns/pickups/voice 产物
-  （remixes 成片不删）。
+  该会话在 data 树的 asr/reports/knockdowns/pickups/voice/game_reports
+  产物（remixes 成片不删）。
 
 ---
 
@@ -270,17 +276,31 @@ JSONL，每行一个事件，write-once（文件存在即为完整结论）：
 | kind | 含义 | meta 关键字段 |
 | --- | --- | --- |
 | `match_start` | 进入对局（部署字幕） | — |
-| `loadout` | 入局装备（干员/枪械，围绕 match_start 补扫） | `operator` 干员名、`operator_class` 职业（突击/支援/工程/侦察）、`primary_weapon`/`primary_weapon_type` 主武器与类别、`weapons` 全部稳定读数 [{name,type,reads}]、`weapon_source` hud/tab、`operator_reads` 干员读数投票 |
+| `loadout` | 本局装备（干员/枪械，端侧 HUD 提取） | `hero` 干员名、`weapons` 枪械名列表 |
 | `down` | 击倒（击杀信息流播报） | `target` 目标名、`text` 信息流原文 |
 | `loot` | 拾取（容器计数跳变） | `container` 容器名、`context` 同窗文本、`voice_hint` 语音交叉 |
 | `extract` | 撤离结算 | `profit` 本局收获、`kills_official` 官方击杀数 |
 | `dance` | 跳舞 HUD | — |
+
+`loadout` 每局 ≥1 条（通常紧随 `match_start`）；局内多条时消费方按局窗口
+聚合：`hero` 取首条、`weapons` 取并集保出现顺序去重。`meta` 除关键字段外，
+端侧还附带源数据字段（`operator`=hero 同值、`operator_class` 职业、
+`primary_weapon`/`primary_weapon_type`、`weapon_source` hud/tab、
+`weapon_reads` 全部读数 [{name,type,reads}]、`operator_reads` 干员读数投票），
+供端侧本地逐局表渲染与排障，服务端消费方可忽略。旧场次（≤1.1.x）meta 仅
+含源数据字段、无 hero/weapons，消费方按缺失处理显示 `-`。
 
 示例行：
 
 ```json
 {"kind": "down", "t_start": 126.3, "t_end": 126.3, "detail": "击倒 岭南人爱少",
  "confidence": 0.91, "meta": {"target": "岭南人爱少", "text": "岭南人爱少 被…击中头部"},
+ "src": "/…/video/猪猪夏…/猪猪夏… P1 18日12点52分.mp4"}
+{"kind": "loadout", "t_start": 12.5, "t_end": 12.5,
+ "detail": "干员威龙(突击) 主武器AKM(突击步枪)", "confidence": 0.9,
+ "meta": {"hero": "威龙", "weapons": ["AKM"], "operator": "威龙",
+   "operator_class": "突击", "primary_weapon": "AKM",
+   "primary_weapon_type": "突击步枪", "weapon_source": "hud"},
  "src": "/…/video/猪猪夏…/猪猪夏… P1 18日12点52分.mp4"}
 ```
 
@@ -294,12 +314,14 @@ JSONL，每行一个事件，write-once（文件存在即为完整结论）：
 | `pushed_at` | str | ISO8601（秒） |
 | `parts` | list | 每分片：`client_video`（端侧绝对路径）、`filename`、`asr_dir`、`events_rpt`（规范 `_full` 名）、`voice_dir?` |
 | `missing` | list[str] | 缺失产物说明（ASR/事件流），打标站如实显示 |
-| `lines` | object | `knockdowns`/`pickups`：目录名或 null；`voice`：目录名列表 |
+| `lines` | object | `knockdowns`/`pickups`：目录名或 null；`voice`：目录名列表（`report` 为服务端状态键，见 §5.3，端侧 manifest 不写） |
 
 ### 5.3 session.json（`sessions/<场次>/`，服务端写）
 
 manifest 的超集：`session`、`imported_at`、`mode`、`video_ready`（bool，
-源片是否齐）、`parts`（每项额外含 `server_video` 服务端路径）、`lines`。
+源片是否齐）、`parts`（每项额外含 `server_video` 服务端路径）、`lines`
+（较 manifest 可多出 `report`：逐场报告目录名，SRV-2 eval 写入，
+import-session 幂等重跑保留）。
 
 ### 5.4 transcript.json / speaker_labeled.json（`data/asr/<分片slug>/`）
 
@@ -334,7 +356,7 @@ manifest 的超集：`session`、`imported_at`、`mode`、`video_ready`（bool�
 ```jsonc
 { "session": "<场次名>",
   "matches": [ { "no": 1, "enter": 46032, "dur": 1502.0, "downs": 3,
-                 "loots": 21, "ok": true, "profit": 8926620 } ],   // 逐局口径见 toolbox/chrono.py（2026-09-22 自 report.py 下沉，行为不变）
+                 "loots": 21, "ok": true, "profit": 8926620 } ],   // 逐局口径见 build_matches（端侧 toolbox/chrono.py；服务端副本在 report.py）
   "clips": [ {
       "file": "04_P1_07m15s_连拾x3.mp4", "part": "1",
       "t_start": 435.2, "t_end": 441.0,            // 首末拾取时刻（分片内）
@@ -377,8 +399,9 @@ manifest 的超集：`session`、`imported_at`、`mode`、`video_ready`（bool�
 
 ### 5.9 服务端自产、不回流端侧
 
-`scores.json`、`review.html`、`l2/`（人工标注）、`_frames/`、报告 md —— 均
-服务端可重建或人工产物，不进入任何上送/下拉集合。
+`scores.json`、`review.html`、`l2/`（人工标注）、`_frames/`、报告 md
+（`data/game_reports/<场次slug>/game_report.md` 逐场报告与 report 命令的
+池级汇总）—— 均服务端可重建或人工产物，不进入任何上送/下拉集合。
 
 ---
 
@@ -406,8 +429,17 @@ manifest 的超集：`session`、`imported_at`、`mode`、`video_ready`（bool�
 
 ## 8. 变更记录（changelog）
 
+> **2026-10-14 并轨说明**：本表曾因双端副本各自维护出现版本号漂移——同一
+> site_url 勘误双端分别记 1.1.1 / 1.0.1；服务端「逐场报告线」曾记 1.1.0，
+> 与端侧 1.1.0「loadout 初版」撞号；端侧 site_url 迁移曾暂记 1.1.2。今日
+> 以《cut_kb/接口约定.md》台账建立为契机并轨为下表统一编号（行内括注保留
+> 原始记录），1.2.0 起严格走「先台账登记、再改权威版、双端同步副本」流程。
+
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
-| 2026-09-21 | 1.1.1 | §2.2 | `site_url` 默认值由 `https://95188.pw/eval/` 改为 `http://8.133.251.179/eval/`（原域名失效，统一改公网 IP；人用地址、非机器接口，勘误级变更，机器通道不受影响） |
-| 2026-09-20 | 1.1.0 | §5.1 | events.jsonl 新增事件类型 `loadout`（入局装备：干员/职业/主武器/枪械类别，围绕 match_start 补扫产出；兼容变更，消费方按未知 kind 忽略即可） |
+| 2026-10-14 | 1.2.0 | §5.1 | 兼容性新增：events.jsonl kind `loadout` 补齐 `meta.hero`（干员名）/`meta.weapons`（枪械名列表，局内多条按窗口聚合：hero 取首条、weapons 并集保序）。服务端逐场报告逐局表新增「干员」「枪械」两列，缺失显示 "-"。无新接口，push 通道与排除规则不变；旧端/旧场次不破坏（REQ-20261014-002） |
+| 2026-10-14 | 1.1.3 | §2.2 | `site_url` 由 `http://8.133.251.179/eval/` 改为 `http://8.153.157.239/eval/`（服务器迁移：新生产=8.153.157.239，旧 8.133.251.179 转测试环境；人用地址、非机器接口，勘误级变更，机器通道不受影响。端侧曾暂记 1.1.2，并轨顺延） |
+| 2026-09-21 | 1.1.2 | SRV-2 / SRV-3 / §5.3 | 兼容性新增：逐场报告线 `data/game_reports/<场次slug>/game_report.md`（与击倒/拾取/语音平级，仅统计本场次事件）；`session.json` `lines` 新增可选键 `report`（服务端写，manifest 不含，import 幂等保留，prune 连带删除）。端侧 manifest 无需改动（服务端曾记 1.1.0，端侧副本当时未同步，2026-10-14 并轨补录、编号顺延） |
+| 2026-09-21 | 1.1.1 | §2.2 | `site_url` 默认值由 `https://95188.pw/eval/` 改为 `http://8.133.251.179/eval/`（原域名失效，统一改公网 IP；人用地址、非机器接口，勘误级变更，机器通道不受影响。服务端副本同一变更误记 1.0.1，并轨归一） |
+| 2026-09-20 | 1.1.0 | §5.1 | events.jsonl 新增事件类型 `loadout`（初版口径：operator/职业/主武器等源数据字段，围绕 match_start 补扫产出；兼容变更，消费方按未知 kind 忽略即可。meta 关键字段已于 1.2.0 重定义为 hero/weapons，本行仅存档） |
 | 2026-09-20 | 1.0.0 | 全部 | 初版：从 transfer.py 既有实现（2026-09-17 决策）固化为契约；manifest 新增 `contract_version` 字段（兼容变更，服务端忽略未知字段即可） |
