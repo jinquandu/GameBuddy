@@ -1,14 +1,14 @@
 """应用端全链流水线（两步上传模型的客户端链路）。
 
 download(B站) -> asr -> speaker -> detect(OCR事件池) -> knockdowns -> pickups
--> voice -> push(评估包)。识别重活全在应用端 Apple Silicon；服务端收评估包
-跑打分/打标（toolbox eval），被选中做片的场次再 `push --mode video` 补传源片
-跑混剪（highlight/remix），应用端 pull 拉回成片。
+-> queues(点击匹配截图) -> voice -> push(评估包)。识别重活全在应用端 Apple
+Silicon；服务端收评估包跑打分/打标（toolbox eval），被选中做片的场次再
+`push --mode video` 补传源片跑混剪（highlight/remix），应用端 pull 拉回成片。
 
 用法：
     python3 -m toolbox pipeline <BV号或URL>            # 从下载开始
     python3 -m toolbox pipeline video/<场次目录>        # 素材已在本地
-    --skip download asr speaker detect knockdowns pickups voice push
+    --skip download asr speaker detect knockdowns pickups queues voice push
 """
 import re
 import time
@@ -125,6 +125,12 @@ def run_pipeline(target, config=None, skip=(), run_eval=False):
 
     stage("knockdowns", do_knockdowns)
     stage("pickups", do_pickups)
+
+    def do_queues():
+        from toolbox.queues import queues
+        return queues(target, config)
+
+    stage("queues", do_queues)
 
     def do_voice():
         from toolbox.voice import voice_session

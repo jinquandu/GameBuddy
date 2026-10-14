@@ -1,7 +1,7 @@
 """统一命令行入口：python3 -m toolbox <子命令>。
 
 【应用端】record / download / asr / speaker / detect / knockdowns / pickups /
-          voice / pipeline / push / pull
+          queues / voice / pipeline / push / pull
 【服务端】import-session / eval / sessions（容器内执行，接口契约见
           docs/SERVER-INTERFACE.md）
 【本地通用】ingest / list / highlight / remix / score / pscore / report / stats
@@ -132,6 +132,12 @@ def cmd_pickups(args):
     for target in args.targets:
         pickups(target, load_config(), merge=args.merge,
                 redetect=args.redetect, fps=args.fps, workers=args.workers)
+
+
+def cmd_queues(args):
+    from toolbox.queues import queues
+    for target in args.targets:
+        queues(target, load_config(), force=args.force)
 
 
 def cmd_pscore(args):
@@ -446,6 +452,16 @@ def build_parser():
     sp.add_argument("--workers", type=int, default=None,
                     help="检测并行进程数（0=自动 CPU-1）")
     sp.set_defaults(func=cmd_pickups)
+
+    sp = sub.add_parser(
+        "queues",
+        help="点击匹配时刻截图：每局回溯定位「匹配中/出发」按钮帧并抽帧"
+             "（只读已有事件流，不触发检测）")
+    sp.add_argument("targets", nargs="+",
+                    help="场次目录（含 P1..PN 分片）/ 视频文件，可多个")
+    sp.add_argument("--force", action="store_true",
+                    help="重扫索引中已定位/已跳过的局")
+    sp.set_defaults(func=cmd_queues)
 
     sp = sub.add_parser(
         "pscore", help="拾取会话打分：箱子/背包整体价值量化（L0 跳变 + L1 音频/红光晕 + L2 帧审）")

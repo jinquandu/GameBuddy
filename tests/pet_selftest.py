@@ -60,9 +60,10 @@ check("错误行捕获", p2.error_line and "rsync" in p2.error_line)
 # ---- 2) latest_stats：对着现有 data/ 树（结构性校验，不硬编码本地数据）----
 st = latest_stats()
 print("latest_stats ->", st)
-check("键完整", set(st) == {"session", "knockdowns", "pickups", "voice"})
+check("键完整", set(st) == {"session", "knockdowns", "pickups", "voice",
+                            "queues"})
 check("计数类型", all(st[k] is None or (isinstance(st[k], int) and st[k] >= 0)
-                      for k in ("knockdowns", "pickups", "voice")))
+                      for k in ("knockdowns", "pickups", "voice", "queues")))
 vdirs = [p.name for p in (DATA / "voice").iterdir()] \
     if (DATA / "voice").is_dir() else []
 check("场次名与产物目录对得上",

@@ -10,7 +10,7 @@ v2（2026-10-12 按用户反馈改素朴）：
 - 桌面录制入口移除（CLI：python -m toolbox screenrec）；租户 ID 只在
   config.yaml 维护；✂自动剪辑/↻续跑等按钮能力并入主按钮状态机/CLI。
 
-状态机：idle 待命 / run 跑链（n/8 + 当前阶段）/ done 完成 / err 出错
+状态机：idle 待命 / run 跑链（n/9 + 当前阶段）/ done 完成 / err 出错
 （主按钮变「↻ 续跑」，跳过已完成阶段）/ stop 手动停止。
 
 调试：设 PET_SNAPSHOT=<目录> 启动后自动对各状态截图存 PNG（UI 回归用）。
@@ -38,7 +38,7 @@ LOG_PIPE = _get_log("pipeline")       # 跑链子进程全量输出（排障用�
 STAGES = [  # (阶段名, 显示名) —— 与 pipeline.run_pipeline 的 stage 顺序一致
     ("download", "下载"), ("asr", "ASR 转写"), ("speaker", "说话人区分"),
     ("detect", "OCR 行为检测"), ("knockdowns", "击倒切片"), ("pickups", "拾取切片"),
-    ("voice", "语音情绪评估"), ("push", "推评估包"),
+    ("queues", "匹配截图"), ("voice", "语音情绪评估"), ("push", "推评估包"),
 ]
 STATE_COLOR = {"idle": "dim", "run": "accent", "done": "good",
                "err": "bad", "stop": "warn"}
@@ -144,9 +144,12 @@ class ProgressParser:
 
 def _clips_len(p: Path):
     try:
-        return len(json.loads(p.read_text(encoding="utf-8")).get("clips", []))
+        d = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if "shots" in d:                       # queues.json：只数已定位抽帧的局
+        return len([s for s in d["shots"] if s.get("file")])
+    return len(d.get("clips", []))
 
 
 def latest_stats():
@@ -154,7 +157,8 @@ def latest_stats():
 
     刚跑完的场次产物必然最新，空闲态展示它即「目前的进展」。
     """
-    out = {"session": "", "knockdowns": None, "pickups": None, "voice": None}
+    out = {"session": "", "knockdowns": None, "pickups": None, "voice": None,
+           "queues": None}
 
     def newest(sub, idx):
         root = DATA / sub
@@ -169,6 +173,7 @@ def latest_stats():
 
     out["session"], out["knockdowns"] = newest("knockdowns", "knockdowns.json")
     _, out["pickups"] = newest("pickups", "pickups.json")
+    _, out["queues"] = newest("queues", "queues.json")
 
     vroot = DATA / "voice"                        # 语音目录按 <场次>_P<k> 前缀分组
     groups = {}
@@ -450,6 +455,7 @@ class PetWindow(tk.Tk):
             name = (st["session"] or self.parser.session or "")[:18]
             self._set_state("done", f"完成！{name} 击倒{_or_dash(st['knockdowns'])} "
                                     f"拾取{_or_dash(st['pickups'])} "
+                                    f"匹配{_or_dash(st['queues'])} "
                                     f"语音{_or_dash(st['voice'])}")
             LOG.info("跑链完成：%s", self._status_text)
         else:
