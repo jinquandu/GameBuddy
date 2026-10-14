@@ -16,7 +16,7 @@ server:
   ssh_alias: ecs            # ~/.ssh/config 里的别名（push/pull 走 rsync over ssh）
   remote_root: /opt/dashijie-eval-data   # 服务端稳定数据根（部署包外，更新不删）
   container: dashijie-eval  # 服务端跑 toolbox 的容器（push 触发 import/eval 用）
-  site_url: http://8.133.251.179/eval/
+  site_url: http://8.153.157.239/eval/
   keep_sessions: 3          # 服务端 prune 默认保留最近 N 个会话
 
 # ---- B站直播录制（toolbox record）----

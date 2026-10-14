@@ -2,7 +2,7 @@
 
 端侧 = 识别全链：`download → asr → speaker → detect → knockdowns → pickups
 → voice → pipeline → push/pull`。评估打标、打分合并、混剪在服务端（打标站
-http://8.133.251.179/eval/ ），本包不含这些命令——执行会提示「命令不可用」属正常。
+http://8.153.157.239/eval/ ），本包不含这些命令——执行会提示「命令不可用」属正常。
 
 ## 0. 前置清单
 
@@ -22,7 +22,7 @@ http://8.133.251.179/eval/ ），本包不含这些命令——执行会提示�
 
 ```
 Host ecs
-    HostName 8.133.251.179
+    HostName 8.153.157.239
     User root
     IdentityFile C:\Users\<你>\.ssh\id_ed25519
     # 可选：连接复用
@@ -30,6 +30,9 @@ Host ecs
 ```
 
 验证：`ssh ecs 'echo ok'`。反斜杠路径必须写全或用正斜杠。
+
+> 2026-10-14 迁移：`ecs` = 生产（8.153.157.239）；旧生产 8.133.251.179 转测试
+> 环境，别名 `ecs-test`（同样的 IdentityFile 配一段 `Host ecs-test` 即可）。
 
 ## 2. 安装
 

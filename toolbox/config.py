@@ -73,7 +73,7 @@ DEFAULTS = {
         "remote_root": "/opt/dashijie-eval-data", # 服务端稳定数据根（部署包外，更新不删）
         "tenant": "default",                       # 租户（多租户方案A：数据按租户分前缀）
         "container": "dashijie-eval",              # 服务端跑 toolbox 的容器名
-        "site_url": "http://8.133.251.179/eval/", # 打标站地址（域名失效，改公网 IP）
+        "site_url": "http://8.153.157.239/eval/", # 打标站地址（域名失效，改公网 IP）
         "keep_sessions": 3,                       # 服务端保留最近 N 个会话（prune 默认值）
     },
 }

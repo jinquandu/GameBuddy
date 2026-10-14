@@ -10,7 +10,7 @@
 - **识别链**：本地 ASR 转写（逐句时间戳）、说话人区分、OCR 逐帧行为识别
   （进入对局/入局装备/击倒/拾取/撤离）、三线切片（击倒片段/拾取会话/语音情绪）；
 - **与服务端协作**：评估包上传、打标站打分、成片拉回（打标站
-  http://8.133.251.179/eval/ ，账号找运营）。
+  http://8.153.157.239/eval/ ，账号找运营）。
   跨端接口的权威定义见 [docs/SERVER-INTERFACE.md](docs/SERVER-INTERFACE.md)
   ——新增/变更接口必须先更新该契约文档（含 changelog 与契约版本号）。
 
@@ -203,7 +203,7 @@ python -m toolbox pull --template single_best    # 拉回服务端成片到 data
 
 `import-session` / `sessions` / `eval` / `score` / `pscore` / `remix` /
 `highlight` / `report` —— 评估打标、打分合并、混剪属服务端功能，
-在打标站 http://8.133.251.179/eval/ 完成。
+在打标站 http://8.153.157.239/eval/ 完成。
 
 ### record 参数
 
