@@ -193,6 +193,7 @@ python -m toolbox pull --template single_best    # 拉回服务端成片到 data
 | `detect <视频或id>` | 逐帧行为识别：进入对局/入局装备(干员+枪械)/击倒/拾取/撤离/跳舞 → 事件流 JSONL |
 | `knockdowns <目标...>` | 击倒片段裁剪（连杀合并不切碎，前 6s 后 10s 留白） |
 | `pickups <目标...>` | 拾取会话裁剪（按「一次开箱/开背包会话」口径） |
+| `queues <目标...>` | 点击匹配时刻截图：每局回溯定位「匹配中/出发」按钮帧抽 jpg（只读已有事件流，`--force` 重扫） |
 | `voice [目标...] [--html]` | 主播语音情绪评估：粗扫选段打分 → m4a 切片 + review.html |
 | `pipeline <BV/URL/场次目录>` | 全链串起来（`--run-eval` 触发服务端评估） |
 | `push <场次> [--mode video]` | 上传评估包（默认）/ 成片包（源片全量） |
@@ -245,6 +246,8 @@ python -m toolbox pull --template single_best    # 拉回服务端成片到 data
 - **data/reports/<分片>_full/**：`events.jsonl` 事件流（detector 产，
   knockdown/pickups 按 `src` 复用）；
 - **data/knockdowns|pickups|voice/<场次>/**：切片 mp4/m4a + 索引 JSON + L1 缓存；
+- **data/queues/<场次>/**：每局「点击匹配时刻」截图 jpg + queues.json
+  （回溯定位「匹配中/出发」按钮帧；本地产物，不随 push 上送）；
 - **data/remixes/**：pull 拉回的成片 + cover + publish.json 发布包；
 - 同一场次请在**同一台机器**完成识别（不要 Mac/Windows 混跑）。
 
