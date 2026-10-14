@@ -30,7 +30,10 @@ from pathlib import Path
 
 from toolbox import proc
 from toolbox.config import DATA, REMIXES, REPORTS, load_config
+from toolbox.logs import get_logger
 from toolbox.naming import slug as _slug
+
+log = get_logger(__name__)
 
 # 端侧<->服务端契约版本：与 docs/SERVER-INTERFACE.md 同步维护（先改文档再改
 # 此值）；写入 manifest.json 供服务端检测端侧契约版本。分级见契约文档 §0。
@@ -428,6 +431,14 @@ def import_session(session, remote_root=None):
     if not (sdir / "manifest.json").is_file():
         raise FileNotFoundError(f"无 manifest：{sdir}/manifest.json（先在应用端 push）")
     manifest = json.loads((sdir / "manifest.json").read_text(encoding="utf-8"))
+    log.info("import_session %s 开始（remote_root=%s）", session, root)
+    # §7：服务端忽略 manifest 未知字段；契约主版本未知则提示（不阻断）。
+    mv = str(manifest.get("contract_version", ""))
+    if mv.split(".")[0] != CONTRACT_VERSION.split(".")[0]:
+        print(f"[警告] 端侧契约版本 {mv or '(缺省)'} 与服务端 {CONTRACT_VERSION} 主版本不同，"
+              "请确认双端是否同步发版")
+        log.warning("import_session %s：端侧契约版本 %s 与服务端 %s 主版本不同",
+                    session, mv or "(缺省)", CONTRACT_VERSION)
 
     remapped = unchanged = 0
     for part in manifest["parts"]:
@@ -465,6 +476,15 @@ def import_session(session, remote_root=None):
 
     state_p = sdir / "session.json"
     state = json.loads(state_p.read_text(encoding="utf-8")) if state_p.is_file() else {}
+    # §5.3：session.json 是 manifest 的超集 —— 先继承 manifest 全部字段
+    # （contract_version / pushed_at / missing 等），再覆盖服务端状态字段。
+    # lines.report 是服务端状态（SRV-2 eval 写，manifest 不含），幂等重跑
+    # 不得抹掉（契约 1.1.2）—— 须在 update(manifest) 覆盖 lines 前留存。
+    old_report = (state.get("lines") or {}).get("report")
+    state.update(manifest)
+    lines = dict(manifest.get("lines") or {})
+    if old_report and "report" not in lines:
+        lines["report"] = old_report
     state.update({
         "session": session,
         "imported_at": datetime.now().isoformat(timespec="seconds"),
@@ -473,12 +493,14 @@ def import_session(session, remote_root=None):
                            for p in manifest["parts"]),
         "parts": [dict(p, server_video=str(sdir / "video" / p["filename"]))
                   for p in manifest["parts"]],
-        "lines": manifest.get("lines", {}),
+        "lines": lines,
     })
     state_p.write_text(json.dumps(state, ensure_ascii=False, indent=2),
                        encoding="utf-8")
     print(f"[{session}] 重映射 {remapped} 处 / 未匹配 {unchanged}；"
           f"video_ready={state['video_ready']} -> {state_p}")
+    log.info("import_session %s 完成：重映射 %d 处 / 未匹配 %d / video_ready=%s",
+             session, remapped, unchanged, state["video_ready"])
 
 
 # ---------------------------------------------------------------- 服务端 sessions 管理
@@ -546,11 +568,14 @@ def sessions(action="list", keep=None, tenant=None):
                     doomed.append(data_root / "knockdowns" / lines["knockdowns"])
                 if lines.get("pickups"):
                     doomed.append(data_root / "pickups" / lines["pickups"])
+                if lines.get("report"):
+                    doomed.append(data_root / "game_reports" / lines["report"])
                 for vd in lines.get("voice") or []:
                     doomed.append(data_root / "voice" / vd)
                 for d in doomed:
                     if d and d.is_dir():
                         shutil.rmtree(d)
+                        log.warning("prune 删除 %s", d)
                 print(f"[{t.name}] 已删 sessions/{e['dir'].name} "
                       f"及 {len(doomed)-1} 处 data 产物")
         print(f"prune 完成：每租户保留最近 {keep} 个会话")
