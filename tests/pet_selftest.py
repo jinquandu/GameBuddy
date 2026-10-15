@@ -101,8 +101,21 @@ try:
     win._tray_show()
     win.update()
     check("托盘恢复窗口", win.wm_state() == "normal")
-    win._save_hist()
-    win.destroy()
+    # 点 X 必须走 _on_close 清理链（P0-3：默认销毁会让跑链子进程成孤儿）；
+    # 协议事件无法 event_generate，注册用查询式验证，清理链直接调用走通
+    reg = win.protocol("WM_DELETE_WINDOW")     # 无参调用 = 查询已注册处理器
+    print("   WM_DELETE_WINDOW ->", reg)
+    check("点 X 注册到清理链", bool(reg) and "_on_close" in reg)
+    win._on_close()
+    try:
+        win.update()
+    except tk.TclError:
+        pass    # 销毁后残余事件，忽略
+    try:         # PetWindow 即根窗口，destroy 后 winfo 也一并没了
+        alive = bool(win.winfo_exists())
+    except tk.TclError:
+        alive = False
+    check("清理链销毁窗口", not alive)
     check("GUI 冒烟完成", True)
 except tk.TclError as e:
     check(f"GUI 冒烟（TclError: {e}）", False)

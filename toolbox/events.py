@@ -44,6 +44,25 @@ def collect_videos(target):
 
 # ---------------------------------------------------------------- 事件获取
 
+def _read_events(lines, where):
+    """逐行解析事件流，容忍损坏行（历史非原子写留下的截断文件）：
+
+    - **尾行损坏 = 写入中途被杀**，该文件不是完整结论，返回 None 让调用方
+      走重扫（否则 knockdowns/pickups 每次启动都炸在同一行，崩溃循环）；
+    - 中间孤立坏行（磁盘位损）跳过并告警，其余行照常复用。
+    """
+    events = []
+    for i, l in enumerate(lines):
+        try:
+            events.append(json.loads(l))
+        except json.JSONDecodeError:
+            if i == len(lines) - 1:
+                print(f"  警告：{where} 尾行损坏（写入中断），不复用、将重扫")
+                return None
+            print(f"  警告：{where} 第 {i + 1} 行损坏，跳过该行")
+    return events
+
+
 def existing_events(video: Path):
     """在 data/reports/*/events.jsonl 里按 src 找该视频的事件流；没有返回 None。"""
     for rpt in sorted(REPORTS.glob("*/events.jsonl")):
@@ -56,7 +75,9 @@ def existing_events(video: Path):
             continue
         if first.get("src") != str(video):
             continue
-        events = [json.loads(l) for l in lines]
+        events = _read_events(lines, rpt.parent.name)
+        if events is None:
+            continue
         for e in events:
             e.setdefault("src", str(video))
         return rpt, events
@@ -99,9 +120,12 @@ def events_for_pickup(video: Path, config, fps=1.0, workers=1):
     if conv.exists():
         lines = [l for l in conv.read_text(encoding="utf-8").splitlines()
                  if l.strip()]
-        print(f"  {video.name[:36]}：复用报告 {conv.parent.name}"
-              f"（{len(lines)} 条）", flush=True)
-        return [json.loads(l) for l in lines]
+        events = _read_events(lines, conv.parent.name)
+        if events is not None:
+            print(f"  {video.name[:36]}：复用报告 {conv.parent.name}"
+                  f"（{len(events)} 条）", flush=True)
+            return events
+        print(f"  {video.name[:36]}：报告不完整，改走重扫", flush=True)
     found = existing_events(video)
     if found:
         rpt, events = found

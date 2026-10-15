@@ -358,7 +358,8 @@ def _scan_range(path, t_lo, t_hi, fps, pack, emit_from=0.0):
                             {"quality": q, "price": price,
                              "price_source": psrc}))
         # 4) 拾取：容器计数增加（连续确认制——计数增加后下一采样帧仍
-        #    保持才记事件，过滤观战视角切换造成的计数来回抖动）
+        #    保持才记事件，过滤观战视角切换造成的计数来回抖动；连续再增
+        #    视为前次已被证实先记入，同 pickup.py 的会话内跳变口径）
         for cx, cy, text, score in items:
             m = CONTAINER_RE.search(text)
             if not m:
@@ -367,6 +368,10 @@ def _scan_range(path, t_lo, t_hi, fps, pack, emit_from=0.0):
             prev = containers.get(name)
             containers[name] = cur
             if prev is not None and cur > prev:
+                if name in pendings:
+                    # 连续再增：无条件覆盖会把 5->6->7 的 5->6 静默丢掉
+                    pt, d0, s0, m0 = pendings.pop(name)
+                    raw.append((pt, "loot", d0, s0, m0))
                 ctx = [x for x in texts_all
                        if not _NOISE.search(x) and not CONTAINER_RE.search(x)]
                 price, psrc = _estimate_price(ctx, price_table)
@@ -1098,9 +1103,17 @@ def _aggregate(raw, gap):
 
 
 def write_jsonl(events, path, src=""):
-    with open(path, "w", encoding="utf-8") as f:
-        for e in events:
-            f.write(e.to_line(src) + "\n")
+    """原子写（同目录 tmp + os.replace）：中途被硬杀（pet 的 taskkill /T /F、
+    断电）不会留截断尾行——读端约定「文件存在即完整结论」（events.py）。"""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for e in events:
+                f.write(e.to_line(src) + "\n")
+        os.replace(tmp, path)      # 同卷原子替换；失败时 finally 清掉残留 tmp
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def summarize(events):

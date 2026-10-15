@@ -80,6 +80,7 @@ def run_pipeline(target, config=None, skip=(), run_eval=False):
     def do_asr():
         nonlocal asr_dirs
         from toolbox.asr import asr
+        # 失败分P为 None（单分P已隔离，见 asr()），speaker/voice 会跳过 None
         dirs = asr(target)                      # 已转写的分片自动跳过
         by_name = {Path(str(v)).name: d for v, d in zip(videos, dirs)}
         asr_dirs = by_name
@@ -100,11 +101,20 @@ def run_pipeline(target, config=None, skip=(), run_eval=False):
 
     def do_speaker():
         from toolbox import speaker
-        outs = []
+        outs, skipped = [], []
         for d in asr_dirs.values():
-            if d and (d / "transcript.json").is_file():
+            if not (d and (d / "transcript.json").is_file()):
+                continue
+            try:                   # 单分P失败只跳过它（如 wav 被清理）
                 out, _ = speaker.run(d / "transcript.json")
                 outs.append(out)
+            except Exception as e:    # noqa: BLE001 分P相互独立，隔离故障
+                skipped.append(f"{Path(d).name}({type(e).__name__})")
+                print(f"[pipeline] speaker 跳过 {Path(d).name}："
+                      f"{type(e).__name__}: {e}", flush=True)
+        if skipped:
+            print(f"[pipeline] speaker 部分完成（{len(skipped)} 个分P失败："
+                  f"{', '.join(skipped[:6])}）", flush=True)
         return outs
 
     stage("speaker", do_speaker)

@@ -224,6 +224,9 @@ class PetWindow(tk.Tk):
 
         self._place_bottom_right()
         self.bind("<Unmap>", self._on_unmap)   # 最小化 → 托盘
+        # 点 X 必须走 _on_close：Tk 默认销毁会绕过杀链/存历史/退托盘，
+        # 跑链子进程成孤儿继续烧 CPU
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._poll)
         self.after(2500, self._dev_snapshot)
 

@@ -8,8 +8,11 @@ sys.path.insert(0, ".")
 import toolbox.pet as pet
 
 _real_popen = subprocess.Popen
+# queues 进 pipeline（2026-10-14）时漏了这里：不在 SKIP 表就会对真场次
+# 跑按钮区 OCR（分钟级），60s 超时后测试挂 run 态失败，且旧收尾直接
+# destroy() 绕过杀链，每失败一次漏一个孤儿子进程（P0-3 病理现场）
 SKIP = ["--skip", "download", "asr", "speaker", "detect",
-        "knockdowns", "pickups", "voice", "push"]
+        "knockdowns", "pickups", "queues", "voice", "push"]
 
 
 def _patched_popen(args, **kw):
@@ -37,8 +40,14 @@ print("status =", status)
 print("skip 标记数 =", len(done_stages),
       "done_count =", win.parser.done_count())
 print("日志尾 =", win._logs[-1] if win._logs else "")
-ok = win.state == "done" and "完成" in status and len(done_stages) == 8
-win._on_close() if win.proc is None else None
-win.destroy()
+ok = win.state == "done" and "完成" in status and len(done_stages) == 9
+if win.proc is None:
+    win._on_close()          # 完整清理链（存历史/退托盘/destroy）
+else:
+    win._stop()              # 兜底杀树：失败路径也不留孤儿子进程
+try:
+    win.destroy()
+except Exception:
+    pass
 print("E2E", "PASS ✅" if ok else "FAIL ❌")
 sys.exit(0 if ok else 1)

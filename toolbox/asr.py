@@ -152,13 +152,26 @@ def transcribe_part(video: Path, model, out_root: Path = None):
 
 def asr(target):
     """链路入口：场次目录（P1..PN 分片）/ 单个视频文件 -> 逐分片转写。
-    模型只加载一次，多分片复用。返回本轮新转写的 asr 目录列表。"""
+    模型只加载一次，多分片复用。返回与分片按位对齐的 asr 目录列表（含
+    已有转写的复用；失败分P为 None）——单分P失败（无音轨/短分P无句）只
+    跳过该分P不炸整链，pipeline 的 OCR 线不受牵连；全部分P失败才抛
+    （语音线整体不可用须让上层知道）。"""
     from toolbox.events import collect_videos
     videos = collect_videos(target)
     print(f"ASR 转写：{len(videos)} 个分片（模型加载一次，逐分片转写）")
     model = _load_model()
-    done = []
+    done, skipped = [], []
     for v in videos:
-        d, _ = transcribe_part(v, model)
-        done.append(d)
+        try:
+            d, _ = transcribe_part(v, model)
+            done.append(d)
+        except Exception as e:    # noqa: BLE001 分P相互独立，隔离故障
+            done.append(None)
+            skipped.append(f"{v.name[:32]}({type(e).__name__})")
+            print(f"  跳过 {v.name[:40]}：{type(e).__name__}: {e}", flush=True)
+    if skipped:
+        if len(skipped) == len(videos):
+            raise RuntimeError(f"全部分片转写失败：{'; '.join(skipped[:3])}")
+        print(f"ASR 部分完成：{len(skipped)}/{len(videos)} 个分P跳过"
+              f"（{'; '.join(skipped[:6])}）", flush=True)
     return done

@@ -465,14 +465,20 @@ def import_session(session, remote_root=None):
             for l in (rpt / "events.jsonl").read_text(encoding="utf-8").splitlines():
                 if not l.strip():
                     continue
-                e = json.loads(l)
+                try:
+                    e = json.loads(l)
+                except json.JSONDecodeError:   # 历史截断尾行：跳过，不让 push 炸
+                    print(f"  警告：{rpt.name} 损坏行跳过（src 重映射）")
+                    continue
                 if e.get("src") == client_video:
                     e["src"] = server_video
                     remapped += 1
                 else:
                     unchanged += 1
                 out.append(json.dumps(e, ensure_ascii=False))
-            (rpt / "events.jsonl").write_text("\n".join(out) + "\n", encoding="utf-8")
+            tmp = rpt / "events.jsonl.tmp"   # 原子替换，中途被杀不留截断
+            tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+            os.replace(tmp, rpt / "events.jsonl")
 
     state_p = sdir / "session.json"
     state = json.loads(state_p.read_text(encoding="utf-8")) if state_p.is_file() else {}
