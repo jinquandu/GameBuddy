@@ -9,7 +9,8 @@
 
 素材收集/事件池获取/命名约定已下沉 toolbox.events / toolbox.naming
 （2026-09-22），本模块只保留击倒领域逻辑；下方转引仅为兼容历史导入方
-（服务端镜像包可能仍 `from toolbox.knockdown import ...`）。
+（服务端 transfer 已于 2026-10-16 REQ-20261014-004 改从 toolbox.common
+导入 collect_videos，不再引用本模块）。
 """
 import json
 import subprocess
@@ -19,7 +20,7 @@ from toolbox import proc
 from toolbox.config import DATA, load_config
 from toolbox.detector import _video_duration
 # collect_videos/events_for 兼容转引：历史版本寄生在本模块，新代码请从
-# events/naming 导入
+# events/common 导入
 from toolbox.events import collect_videos, events_for, part_no
 from toolbox.naming import mmss as _mmss, slug as _slug
 

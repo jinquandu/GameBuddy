@@ -8,6 +8,10 @@ import json
 import re
 from pathlib import Path
 
+# collect_videos 单一实现已收敛 toolbox/common.py（REQ-20261014-004，双端
+# transfer 同源导入）；此处转引保 knockdown/pickup/queues/pipeline/asr
+# 历史导入方
+from toolbox.common import collect_videos
 from toolbox.config import REPORTS
 from toolbox.detector import scan_video, write_jsonl
 from toolbox.naming import slug
@@ -22,24 +26,6 @@ def part_no(video: Path):
     """文件名里的分片号：`... P3 09日00点04分.mp4` -> 3。"""
     m = re.search(r"P(\d+)", video.stem)
     return m.group(1) if m else "-"
-
-
-# ---------------------------------------------------------------- 视频收集
-
-def collect_videos(target):
-    """目标（目录/文件/登记id）-> 按分片序排序的视频路径列表。"""
-    p = Path(target).expanduser()
-    if p.is_dir():
-        vids = sorted((f.resolve() for f in p.iterdir()
-                       if f.suffix.lower() in {".mp4", ".flv", ".mkv", ".mov"}),
-                      key=lambda f: (len(f.stem), f.name))   # P2 排在 P10 前
-        if not vids:
-            raise RuntimeError(f"{p} 下没有视频文件")
-        return vids
-    if p.is_file():
-        return [p.resolve()]
-    from toolbox.ingest import recording_path   # 未登记则抛 FileNotFoundError
-    return [recording_path(str(target))]
 
 
 # ---------------------------------------------------------------- 事件获取

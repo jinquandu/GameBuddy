@@ -28,12 +28,15 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from toolbox import proc
+from toolbox.common import collect_videos, du, get_logger, slug
 from toolbox.config import DATA, REMIXES, REPORTS, load_config
-from toolbox.logs import get_logger
-from toolbox.naming import slug as _slug
 
-log = get_logger(__name__)
+log = get_logger("transfer")
+
+# 子进程不闪控制台窗：Windows 用 CREATE_NO_WINDOW，服务端（Linux）恒 0、
+# 等价无操作。proc.py 是端侧独有模块，同源文件内联此常量保双端可跑
+# （REQ-20261014-004）。
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # 端侧<->服务端契约版本：与 docs/SERVER-INTERFACE.md 同步维护（先改文档再改
 # 此值）；写入 manifest.json 供服务端检测端侧契约版本。分级见契约文档 §0。
@@ -48,7 +51,7 @@ CONTRACT_VERSION = "1.2.0"
 def _canonical_rpt(video: Path):
     """事件流在服务端的规范目录名：<分片stem>_full（与 knockdown 链路自检写出的
     命名一致；事件池 discover_pool 只认 *_full，本地历史裸名目录在搬运时归一）。"""
-    return _slug(video.stem) + "_full"
+    return slug(video.stem) + "_full"
 
 
 def _find_events_rpt(video: Path):
@@ -78,8 +81,8 @@ def _find_events_rpt(video: Path):
 
 def discover_session(session):
     """按各链路既定命名规则聚拢一个场次的所有产物（缺失项为 None/[]）。"""
+    # toolbox.asr 为端侧独有模块：懒加载，服务端不调本函数即不触发
     from toolbox.asr import find_transcript_dir
-    from toolbox.events import collect_videos
     target = Path(session).expanduser()
     videos = collect_videos(session)
     session_name = (videos[0].parent.name if len(videos) > 1 or target.is_dir()
@@ -97,7 +100,7 @@ def discover_session(session):
                  "asr_dir": asr_dir.name if asr_dir else None,
                  # 服务端统一落规范 _full 名：事件池/报告只认 *_full
                  "events_rpt": _canonical_rpt(v) if rpt else None}
-        voice_dir = DATA / "voice" / _slug(asr_dir.name, 40) if asr_dir else None
+        voice_dir = DATA / "voice" / slug(asr_dir.name, 40) if asr_dir else None
         if voice_dir and voice_dir.is_dir():
             voice_dirs.append(voice_dir)
             entry["voice_dir"] = voice_dir.name
@@ -105,8 +108,8 @@ def discover_session(session):
         if rpt:
             local_rpts.append(rpt)
 
-    kd_dir = DATA / "knockdowns" / _slug(session_name, 60)
-    pk_dir = DATA / "pickups" / _slug(session_name, 60)
+    kd_dir = DATA / "knockdowns" / slug(session_name, 60)
+    pk_dir = DATA / "pickups" / slug(session_name, 60)
     return {
         "session": session_name,
         "parts": parts,
@@ -117,16 +120,6 @@ def discover_session(session):
         "voice_dirs": sorted(set(voice_dirs)),
         "missing": missing,
     }
-
-
-def _du(paths):
-    total = 0
-    for p in map(Path, paths):
-        if p.is_file():
-            total += p.stat().st_size
-        elif p.is_dir():
-            total += sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-    return total
 
 
 # ---------------------------------------------------------------- 进程执行
@@ -142,7 +135,7 @@ def _ssh(alias, remote_cmd, check=True):
             bin_ = str(native)
     return subprocess.run([bin_, alias, remote_cmd],
                           check=check, text=True, capture_output=True,
-                          creationflags=proc.NO_WINDOW)
+                          creationflags=NO_WINDOW)
 
 
 _RSYNC_CACHE = {}
@@ -163,7 +156,7 @@ def _rsync_tool():
             try:
                 r = subprocess.run([c, flag, "--version"],
                                    capture_output=True, timeout=10,
-                                   creationflags=proc.NO_WINDOW)
+                                   creationflags=NO_WINDOW)
             except Exception:
                 break
             if r.returncode == 0:
@@ -216,7 +209,7 @@ def _rsync(src: str, dst: str, excludes=(), dry=False):
                               f"-o UserKnownHostsFile={home}/.ssh/known_hosts"))
         env["PATH"] = str(Path(rsbin).parent) + os.pathsep + env.get("PATH", "")
     r = subprocess.run(cmd, env=env,
-                       creationflags=proc.NO_WINDOW)
+                       creationflags=NO_WINDOW)
     if r.returncode != 0:
         raise RuntimeError(f"rsync 失败（退出码 {r.returncode}）：{src} -> {dst}")
 
@@ -277,7 +270,7 @@ def push(session, mode="eval", dry=False, run_eval=False, no_import=False,
         vids = [Path(p["client_video"]) for p in disc["parts"]]
         if not vids or not all(v.is_file() for v in vids):
             raise RuntimeError(f"源片不存在：{session}")
-        total = _du(vids)
+        total = du(vids)
         vdir = f"{remote}/sessions/{disc['session']}/video"
         print(f"成片包：{len(vids)} 个源片，约 {total/1e9:.2f}GB -> {vdir}")
         _mkdir(alias, vdir, dry)
@@ -309,7 +302,7 @@ def push(session, mode="eval", dry=False, run_eval=False, no_import=False,
                      for v in disc["voice_dirs"]]
         if not mappings:
             raise RuntimeError("没有可上传的产物")
-        total = _du([m[0] for m in mappings])
+        total = du([m[0] for m in mappings])
         print(f"评估包：{len(mappings)} 组，约 {total/1e9:.2f}GB")
         for local, remote_dir, excludes in mappings:
             _mkdir(alias, remote_dir, dry)
@@ -428,17 +421,17 @@ def import_session(session, remote_root=None):
     cfg = load_config()
     root = Path(remote_root or cfg["server"]["remote_root"])
     sdir = root / "sessions" / session
+    log.info("import_session 开始 session=%r remote_root=%s", session, root)
     if not (sdir / "manifest.json").is_file():
         raise FileNotFoundError(f"无 manifest：{sdir}/manifest.json（先在应用端 push）")
     manifest = json.loads((sdir / "manifest.json").read_text(encoding="utf-8"))
-    log.info("import_session %s 开始（remote_root=%s）", session, root)
     # §7：服务端忽略 manifest 未知字段；契约主版本未知则提示（不阻断）。
     mv = str(manifest.get("contract_version", ""))
     if mv.split(".")[0] != CONTRACT_VERSION.split(".")[0]:
+        log.warning("契约主版本不同 端侧=%s 服务端=%s session=%r",
+                    mv or "(缺省)", CONTRACT_VERSION, session)
         print(f"[警告] 端侧契约版本 {mv or '(缺省)'} 与服务端 {CONTRACT_VERSION} 主版本不同，"
               "请确认双端是否同步发版")
-        log.warning("import_session %s：端侧契约版本 %s 与服务端 %s 主版本不同",
-                    session, mv or "(缺省)", CONTRACT_VERSION)
 
     remapped = unchanged = 0
     for part in manifest["parts"]:
@@ -505,8 +498,9 @@ def import_session(session, remote_root=None):
                        encoding="utf-8")
     print(f"[{session}] 重映射 {remapped} 处 / 未匹配 {unchanged}；"
           f"video_ready={state['video_ready']} -> {state_p}")
-    log.info("import_session %s 完成：重映射 %d 处 / 未匹配 %d / video_ready=%s",
-             session, remapped, unchanged, state["video_ready"])
+    log.info("import_session 完成 session=%r remapped=%d unchanged=%d "
+             "video_ready=%s", session, remapped, unchanged,
+             state["video_ready"])
 
 
 # ---------------------------------------------------------------- 服务端 sessions 管理
@@ -521,14 +515,18 @@ def _tenant_sessions(troot: Path):
         st = sdir / "session.json"
         state = json.loads(st.read_text(encoding="utf-8")) if st.is_file() else {}
         out.append({"ts": state.get("imported_at") or "", "dir": sdir,
-                    "state": state, "size": _du([sdir])})
+                    "state": state, "size": du(sdir)})
     return out
 
 
 def sessions(action="list", keep=None, tenant=None):
-    """【服务端】多租户总览 / prune（按租户保留最近 N 个会话，连带清 data 树产物）。"""
+    """【服务端】多租户总览 / prune（按租户保留最近 N 个会话，连带清 data 树产物）。
+
+    root 解析优先级：TOOLBOX_REMOTE_ROOT 环境变量 > config server.remote_root
+    （前者是服务端本地测试/运维便利，不改变端侧契约）。"""
     cfg = load_config()
-    root = Path(cfg["server"]["remote_root"])
+    root = Path(os.environ.get("TOOLBOX_REMOTE_ROOT")
+                or cfg["server"]["remote_root"])
     troot_all = root / "tenants"
     tenants = [d for d in sorted(troot_all.iterdir())
                if d.is_dir()] if troot_all.is_dir() else []
@@ -539,7 +537,7 @@ def sessions(action="list", keep=None, tenant=None):
     if action == "list":
         for t in tenants:
             entries = _tenant_sessions(t)
-            data_size = _du([t / "data"])
+            data_size = du(t / "data")
             print(f"◇ 租户 {t.name}（data 树 {data_size/1e9:.2f}GB，"
                   f"{len(entries)} 个会话）")
             if not entries:
@@ -581,7 +579,12 @@ def sessions(action="list", keep=None, tenant=None):
                 for d in doomed:
                     if d and d.is_dir():
                         shutil.rmtree(d)
-                        log.warning("prune 删除 %s", d)
                 print(f"[{t.name}] 已删 sessions/{e['dir'].name} "
                       f"及 {len(doomed)-1} 处 data 产物")
+                # 删除审计：prune 不可逆，留痕每个被删目录（不可重建的会话状态在列）
+                log.info("prune 删除 tenant=%s session=%r imported_at=%s "
+                         "dirs=%s", t.name, e["dir"].name, e["ts"] or "?",
+                         [str(d.relative_to(t)) for d in doomed if d])
         print(f"prune 完成：每租户保留最近 {keep} 个会话")
+        log.info("prune 完成 keep=%d tenants=%s", keep,
+                 [t.name for t in targets])
