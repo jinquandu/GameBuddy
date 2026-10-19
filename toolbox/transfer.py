@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import tempfile
 from datetime import datetime
+from fnmatch import fnmatch
 from pathlib import Path
 
 from toolbox.common import collect_videos, du, get_logger, slug
@@ -40,9 +41,11 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # 端侧<->服务端契约版本：与 docs/SERVER-INTERFACE.md 同步维护（先改文档再改
 # 此值）；写入 manifest.json 供服务端检测端侧契约版本。分级见契约文档 §0。
+# 1.3.0：受控 HTTPS 上传通道 C2S-6~9（Bearer 租户 token、路径白名单、
+# 分块续传、complete 自动 import；REQ-20261019-005）；
 # 1.2.0：events.jsonl kind=loadout 补 meta.hero/weapons（REQ-20261014-002）；
 # 1.1.2/1.1.3 为逐场报告线补录与 site_url 迁移（2026-10-14 并轨编号，见 §8）。
-CONTRACT_VERSION = "1.2.0"
+CONTRACT_VERSION = "1.3.0"
 
 
 # ---------------------------------------------------------------- 会话发现
@@ -349,11 +352,20 @@ def push(session, mode="eval", dry=False, run_eval=False, no_import=False,
          tenant=None):
     """上传会话产物到服务端。mode: eval=评估包（默认）| video=成片包（源片）。
 
-    评估包 rsync 直达服务端 data/ 工作树；两种模式完成后（除非 --no-import）
-    均经 ssh 触发容器内 import-session 路径重映射+状态登记，--run-eval 评估包
-    可连跑评估链。多租户：--tenant 覆盖 server.tenant 配置。
+    双通道（契约 1.3.0）：config server.upload_url 非空 → 受控 HTTPS 上传
+    （客户机；Bearer token 鉴权，tenant 由服务端解出，complete 自动 import）；
+    为空 → rsync over ssh 直达服务端 data/ 工作树（内部机），两种模式完成后
+    （除非 --no-import）均触发容器内 import-session 路径重映射+状态登记，
+    --run-eval 评估包可连跑评估链。多租户：rsync 通道 --tenant 覆盖
+    server.tenant 配置；HTTPS 通道 tenant 只由 token 决定。
     """
     cfg = load_config()["server"]
+    if cfg.get("upload_url"):
+        if not cfg.get("upload_token"):
+            raise RuntimeError(
+                "已配置 server.upload_url 但缺少 server.upload_token"
+                "（HTTPS 通道不回退 SSH；token 由运维按租户发放）")
+        return _push_https(cfg, session, mode, dry, run_eval, no_import, tenant)
     alias, remote = cfg["ssh_alias"], _tenant_root(cfg, tenant)
     disc = discover_session(session)
 
@@ -408,8 +420,112 @@ def push(session, mode="eval", dry=False, run_eval=False, no_import=False,
              dry=dry)
 
 
-def _write_manifest(alias, remote, disc, mode, dry=False):
-    manifest = {
+# ---------------------------------------------------------------- HTTPS 通道
+
+# rsync --exclude 语义的枚举等价：尾斜杠=任意层目录段名，否则 basename 通配
+def _excluded(rel_posix, excludes):
+    segs = rel_posix.split("/")
+    for pat in excludes:
+        if pat.endswith("/"):
+            if pat[:-1] in segs:
+                return True
+        elif fnmatch(segs[-1], pat):
+            return True
+    return False
+
+
+def _plan_files(disc, mode):
+    """把一次 push 的内容枚举成 HTTPS 上传清单：返回 (files, local_map,
+    manifest)。files=[(租户根相对路径, size, sha256)] 只含数据/源片文件；
+    manifest 走 complete 请求体由服务端落盘（重跑时 pushed_at 变化不破坏
+    清单签名，断点续传才成立）。路径白名单与 rsync 通道同一批目标
+    （§C2S-1/C2S-2），排除规则同 EVAL_EXCLUDES。"""
+    from toolbox.uploader import file_sha256
+    files, local_map = [], {}
+
+    def add_file(local: Path, rel: str):
+        files.append([rel, local.stat().st_size, file_sha256(local)])
+        local_map[rel] = local
+
+    def add_dir(local: Path, rel_dir: str, excludes=()):
+        for p in sorted(local.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(local).as_posix()
+            if _excluded(rel, excludes):
+                continue
+            add_file(p, f"{rel_dir}/{rel}")
+
+    if mode == "video":
+        vids = [Path(p["client_video"]) for p in disc["parts"]]
+        if not vids or not all(v.is_file() for v in vids):
+            raise RuntimeError(f"源片不存在：{disc['session']}")
+        for v in vids:
+            add_file(v, f"sessions/{disc['session']}/video/{v.name}")
+    else:
+        for d in disc["asr_dirs"]:
+            add_dir(d, f"data/asr/{d.name}", EVAL_EXCLUDES["asr"])
+        parts_with_rpt = [p for p in disc["parts"] if p.get("events_rpt")]
+        for r, p in zip(disc["events_rpts_local"], parts_with_rpt):
+            add_dir(r, f"data/reports/{p['events_rpt']}")
+        if disc["knockdowns_dir"]:
+            add_dir(disc["knockdowns_dir"],
+                    f"data/knockdowns/{disc['knockdowns_dir'].name}",
+                    EVAL_EXCLUDES["knockdowns"])
+        if disc["pickups_dir"]:
+            add_dir(disc["pickups_dir"],
+                    f"data/pickups/{disc['pickups_dir'].name}",
+                    EVAL_EXCLUDES["pickups"])
+        for v in disc["voice_dirs"]:
+            add_dir(v, f"data/voice/{v.name}", EVAL_EXCLUDES["voice"])
+        if not files:
+            raise RuntimeError("没有可上传的产物")
+
+    return files, local_map, _build_manifest(disc, mode)
+
+
+def _push_https(cfg, session, mode, dry, run_eval, no_import, tenant_override):
+    """受控 HTTPS push（契约 C2S-6~9）。tenant 由服务端从 token 解出。"""
+    if tenant_override:
+        print(f"HTTPS 通道：tenant 由服务端从上传 token 解出，"
+              f"--tenant {tenant_override} 忽略")
+    disc = discover_session(session)
+    if mode != "video" and disc["missing"]:
+        print("警告：以下产物缺失，将如实登记为 incomplete：")
+        for m in disc["missing"]:
+            print(f"  - {m}")
+    files, local_map, manifest = _plan_files(disc, mode)
+    total = sum(s for _, s, _ in files)
+    print(f"{'成片包' if mode == 'video' else '评估包'}（HTTPS）："
+          f"{len(files)} 个文件，约 {total / 1e9:.2f}GB")
+    for rel, size, _ in files[:5]:
+        print(f"  {rel}（{size / 1e6:.1f}MB）")
+    if len(files) > 5:
+        print(f"  … 共 {len(files)} 个")
+    if dry:
+        print("（dry-run：未连接服务端）")
+        return
+    from toolbox.uploader import ProductionUploader, push_files
+    receipt = push_files(
+        ProductionUploader(cfg["upload_url"], cfg["upload_token"]),
+        disc["session"], mode, [tuple(f) for f in files], local_map,
+        manifest, run_eval=run_eval, no_import=no_import)
+    state = receipt.get("state")
+    print(f"服务端回执：state={state} session={receipt.get('session')} "
+          f"tenant={receipt.get('tenant')} "
+          f"remapped={receipt.get('remapped')} "
+          f"video_ready={receipt.get('video_ready')}")
+    if receipt.get("log"):
+        print(receipt["log"][-600:])
+    if state != "imported":
+        raise RuntimeError(
+            f"上传完成但 import 未成功（state={state}）；"
+            "数据已在服务端，重跑本命令可重试 import")
+
+
+def _build_manifest(disc, mode):
+    """manifest.json 内容（rsync 与 HTTPS 两通道共用，schema 见契约 §5.2）。"""
+    return {
         "contract_version": CONTRACT_VERSION,
         "session": disc["session"],
         "mode": mode,
@@ -422,6 +538,10 @@ def _write_manifest(alias, remote, disc, mode, dry=False):
             "voice": [v.name for v in disc["voice_dirs"]],
         },
     }
+
+
+def _write_manifest(alias, remote, disc, mode, dry=False):
+    manifest = _build_manifest(disc, mode)
     fd, name = tempfile.mkstemp(suffix=".json")
     os.close(fd)                    # Windows：句柄不关，文件锁定删不掉
     tmp = Path(name)

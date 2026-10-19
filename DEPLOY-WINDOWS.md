@@ -4,19 +4,39 @@
 → voice → pipeline → push/pull`。评估打标、打分合并、混剪在服务端（打标站
 http://8.153.157.239/eval/ ），本包不含这些命令——执行会提示「命令不可用」属正常。
 
-## 0. 前置清单
+## 0. 前置清单（按装机形态二选一）
+
+**客户机（2026-10-19 契约 1.3.0 起的标准形态）**：push 走受控 HTTPS 上传，
+**不需要** ssh 私钥、rsync、OpenSSH——下表只有 Python 和 ffmpeg 两项必装。
 
 | 依赖 | 安装 | 验证 |
 | --- | --- | --- |
 | Python 3.11+ | `winget install Python.Python.3.11` | `python --version` |
 | ffmpeg/ffprobe | `winget install Gyan.FFmpeg` | `ffmpeg -version` |
-| OpenSSH 客户端 | Win10+ 内置（Apps-可选功能确认） | `ssh -V` |
-| GNU rsync | `scoop install rsync`（或 MSYS2 `pacman -S rsync`）；cwRsync 亦可 | `rsync --version` ≥ 3.x |
+
+配置（`config.yaml` server 节，装机时由运维填入）：
+
+```yaml
+server:
+  upload_url: https://95188.pw/api/production/v1
+  upload_token: "dsj_…"   # 运维发放（服务端 upload_token.py issue <租户> --label <装机标识>）
+```
+
+- token 即租户上传身份：泄露可单条吊销换发，不影响其他机器；tenant 由服务端
+  从 token 解出，本机不配置（配了也不参与 HTTPS 通道）。
+- 验证：`python -m toolbox push <场次>`（或直接跑 pipeline）出现
+  「上传会话 …（HTTPS）」字样即走新通道。
+- 常见错误：`[invalid_token]` token 失效/吊销 → 找运维换发；
+  `[contract_mismatch]` → 服务端待升级，等发版。
+
+**内部机（rsync over ssh，运维自用）**：额外需要 OpenSSH 客户端（Win10+
+内置）与 GNU rsync（`scoop install rsync` 或 MSYS2；cwRsync 亦可，
+`rsync --version` ≥ 3.x），config 不配 `upload_url` 即走此通道，见下节。
 
 控制台中文输出：PowerShell 里执行 `$env:PYTHONUTF8=1`（或系统环境变量永久
 设置）。否则中文日志可能触发 UnicodeEncodeError。
 
-## 1. ssh 别名（与 Mac 端同一约定）
+## 1. ssh 别名（仅内部机 rsync 通道需要；与 Mac 端同一约定）
 
 编辑 `C:\Users\<你>\.ssh\config`：
 

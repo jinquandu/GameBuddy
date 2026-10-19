@@ -69,9 +69,15 @@ DEFAULTS = {
     },
     "server": {
         # ---- 应用端 <-> 服务端（ECS）搬运配置，见 toolbox/transfer.py ----
-        "ssh_alias": "ecs",                        # ~/.ssh/config 里的别名
+        # 双通道（契约 1.3.0）：upload_url 非空走受控 HTTPS 上传（客户机，
+        # 不需要 ssh 私钥/rsync；tenant 由服务端从 upload_token 解出）；
+        # 为空走 rsync over ssh（内部机）。
+        "upload_url": "",    # HTTPS 上传基址，客户机配
+                             # https://95188.pw/api/production/v1
+        "upload_token": "",  # 运维按租户发放的上传 Bearer token（HTTPS 通道必配）
+        "ssh_alias": "ecs",                        # ~/.ssh/config 里的别名（rsync 通道）
         "remote_root": "/opt/dashijie-eval-data", # 服务端稳定数据根（部署包外，更新不删）
-        "tenant": "default",                       # 租户（多租户方案A：数据按租户分前缀）
+        "tenant": "default",                       # 租户（多租户方案A：数据按租户分前缀；HTTPS 通道不使用）
         "container": "dashijie-eval",              # 服务端跑 toolbox 的容器名
         "site_url": "http://8.153.157.239/eval/", # 打标站地址（域名失效，改公网 IP）
         "keep_sessions": 3,                       # 服务端保留最近 N 个会话（prune 默认值）

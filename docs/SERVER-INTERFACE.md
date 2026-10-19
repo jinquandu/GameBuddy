@@ -6,11 +6,11 @@
 
 | 项 | 值 |
 | --- | --- |
-| 契约版本（CONTRACT_VERSION） | 1.2.0 |
+| 契约版本（CONTRACT_VERSION） | 1.3.0 |
 | 初版日期 | 2026-09-20 |
 | 权威源 | 端侧仓库 `docs/SERVER-INTERFACE.md`（服务端仓库同名文件为副本，变更时双端同步） |
-| 端侧实现 | `toolbox/transfer.py`（push/pull/import/sessions） |
-| 服务端实现 | 同一套 toolbox 代码，跑在容器 `dashijie-eval` 内 |
+| 端侧实现 | `toolbox/transfer.py`（push/pull/import/sessions）+ `toolbox/uploader.py`（HTTPS 上传客户端） |
+| 服务端实现 | 同一套 toolbox 代码，跑在容器 `dashijie-eval` 内；HTTPS 上传服务 = cut_server `deploy/eval/upload_api.py`（Flask blueprint，宿主 gunicorn 8767） |
 
 ---
 
@@ -57,9 +57,9 @@
 ────                                    ──────────────────────────────
 record/download → asr → speaker
 → detect → knockdowns/pickups/voice
-        │ C2S-1 push 评估包（rsync）
+        │ C2S-1 push 评估包（rsync 内部机 / HTTPS 客户机 C2S-6~9）
         │ C2S-3 manifest
-        ├──────────────────────────→  SRV-1 import-session（ssh 触发）
+        ├──────────────────────────→  SRV-1 import-session（自动触发）
         │ C2S-5 eval 触发（可选）       SRV-2 eval → 打标站评估/打分
         │                               （人工打标 L2）
         │ C2S-2 push 成片包（选中场次）  → highlight/remix 混剪
@@ -78,15 +78,20 @@ data/remixes/（手动上传发布）
 
 | 通道 | 用途 | 说明 |
 | --- | --- | --- |
-| rsync over ssh | 数据搬运（push/pull） | GNU rsync（须支持 `--secluded-args`/`--protect-args`，远端路径含中文/括号）；参数 `-a --partial --modify-window=1`；Windows 平台配方见 DEPLOY-WINDOWS.md |
-| ssh 控制通道 | mkdir / 触发容器命令 | Windows 固定用原生 OpenSSH（`C:\Windows\System32\OpenSSH\ssh.exe`） |
-| docker exec | 容器内跑 toolbox 命令 | `docker exec -e TOOLBOX_DATA_DIR=<租户根>/data <container> python3 -m toolbox <cmd>` |
+| HTTPS 上传 API（1.3.0 起） | 客户机 push 评估包/成片包 | `https://95188.pw/api/production/v1`（nginx TLS → 宿主 127.0.0.1:8767 cut_server）；Bearer 租户 token 鉴权，分块断点续传，complete 服务端自动 import；接口见 C2S-6~C2S-9。**客户分发包一律走此通道**（不装 ssh 私钥/rsync） |
+| rsync over ssh | 数据搬运（内部机器 push/pull） | GNU rsync（须支持 `--secluded-args`/`--protect-args`，远端路径含中文/括号）；参数 `-a --partial --modify-window=1`；Windows 平台配方见 DEPLOY-WINDOWS.md。**仅限内部运维机器** |
+| ssh 控制通道 | mkdir / 触发容器命令（rsync 通道配套） | Windows 固定用原生 OpenSSH（`C:\Windows\System32\OpenSSH\ssh.exe`）；HTTPS 通道不使用 |
+| docker exec | 容器内跑 toolbox 命令 | `docker exec -e TOOLBOX_DATA_DIR=<租户根>/data <container> python3 -m toolbox <cmd>`；HTTPS 通道的 complete 在服务端侧同样以该形态触发 import/eval |
+
+通道选择：`config.yaml server.upload_url` 非空 → HTTPS 通道（`upload_token` 必须同时配置，否则报错，**不静默回退 SSH**）；为空 → rsync 通道。
 
 ### 2.2 配置（config.yaml `server` 块）
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `ssh_alias` | `ecs` | `~/.ssh/config` 里的主机别名 |
+| `upload_url` | 空 | HTTPS 上传 API 基址（客户机配 `https://95188.pw/api/production/v1`）。非空则 push 走 HTTPS 通道，`upload_token` 必须同时配置；空 = rsync 通道（内部机） |
+| `upload_token` | 空 | 上传 Bearer token（运维装机发放，每租户一个；泄露可单 token 吊销）。HTTPS 通道下 **tenant 由服务端从 token 解出**，本配置 `tenant` 不参与、客户端改写无效 |
+| `ssh_alias` | `ecs` | `~/.ssh/config` 里的主机别名（仅 rsync 通道使用） |
 | `remote_root` | `/opt/dashijie-eval-data` | 服务端稳定数据根（部署包外，更新不删） |
 | `tenant` | 未配置=自动分配 | 租户名（多租户方案A）。用户 config 未配置时，端侧首次 push/pull 按装机时间生成 `auto-YYYYMMDD-HHMMSS` 并写回 config.yaml（2026-10-19 起；此前缺省字面 `default`，多客户会串号进同一租户） |
 | `container` | `dashijie-eval` | 服务端容器名 |
@@ -133,15 +138,20 @@ data/remixes/（手动上传发布）
 
 | 编号 | 接口 | 方向 | 通道 | 触发方式 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| C2S-1 | push 评估包 | 端→服务端 | rsync | `toolbox push <场次>`（pipeline 末段自动） | 已实施 |
-| C2S-2 | push 成片包（源片全量） | 端→服务端 | rsync | `toolbox push <场次> --mode video` | 已实施 |
-| C2S-3 | manifest 上报 | 端→服务端 | rsync | 随 C2S-1/C2S-2 自动 | 已实施 |
-| C2S-4 | import-session 触发 | 端→服务端 | ssh+docker exec | push 后自动（`--no-import` 跳过） | 已实施 |
-| C2S-5 | eval 触发 | 端→服务端 | ssh+docker exec | `push --run-eval` / `pipeline --run-eval` | 已实施 |
+| C2S-1 | push 评估包 | 端→服务端 | rsync / HTTPS | `toolbox push <场次>`（pipeline 末段自动） | 已实施 |
+| C2S-2 | push 成片包（源片全量） | 端→服务端 | rsync / HTTPS | `toolbox push <场次> --mode video` | 已实施 |
+| C2S-3 | manifest 上报 | 端→服务端 | rsync / HTTPS | 随 C2S-1/C2S-2 自动 | 已实施 |
+| C2S-4 | import-session 触发 | 端→服务端 | ssh+docker exec（rsync 通道）/ 服务端自动（HTTPS 通道） | push 后自动（`--no-import` 跳过） | 已实施 |
+| C2S-5 | eval 触发 | 端→服务端 | ssh+docker exec（rsync 通道）/ complete 透传（HTTPS 通道） | `push --run-eval` / `pipeline --run-eval` | 已实施 |
+| C2S-6 | 上传能力声明 | 端→服务端 | HTTPS | `GET /api/production/v1/capabilities` | 已实施（1.3.0） |
+| C2S-7 | 创建上传会话 | 端→服务端 | HTTPS | `POST /api/production/v1/uploads` | 已实施（1.3.0） |
+| C2S-8 | 分块上传 / 状态查询 | 端→服务端 | HTTPS | `PUT .../uploads/<id>/files/<idx>?offset=N`、`GET .../uploads/<id>` | 已实施（1.3.0） |
+| C2S-9 | 完成校验+自动 import | 端→服务端 | HTTPS | `POST .../uploads/<id>/complete` | 已实施（1.3.0） |
 | S2C-1 | pull 成片+发布包 | 服务端→端 | rsync | `toolbox pull [--template <名>]` | 已实施 |
-| SRV-1 | import-session（收口） | 服务端容器内 | CLI | C2S-4 触发 / 服务端手动 | 已实施 |
+| SRV-1 | import-session（收口） | 服务端容器内 | CLI | C2S-4 触发 / C2S-9 服务端自动 / 服务端手动 | 已实施 |
 | SRV-2 | eval（评估链） | 服务端容器内 | CLI | C2S-5 触发 / 打标站 | 已实施 |
 | SRV-3 | sessions list/prune | 服务端 | CLI | 运维手动 | 已实施 |
+| SRV-4 | upload-token 运维（发放/吊销/列表） | 服务端 | CLI | `deploy/eval/upload_token.py` | 已实施（1.3.0） |
 
 服务端另有 `highlight / remix / report / score / pscore` 等纯服务端命令
 （端侧包不携带，调用提示「命令不可用」），不在跨端接口范围内，混剪产物
@@ -191,7 +201,8 @@ python -m toolbox push <场次> --mode video
 
 ### C2S-4 / C2S-5 远端触发
 
-push（两种模式）完成后，端侧经 ssh 在服务端执行：
+push（两种模式）完成后，端侧经 ssh 在服务端执行（**rsync 通道**；HTTPS 通道
+下这一步不存在——C2S-9 的 complete 在服务端侧以同形态自动执行）：
 
 ```bash
 docker exec -e TOOLBOX_DATA_DIR=<租户根>/data <container> \
@@ -202,6 +213,109 @@ docker exec -e TOOLBOX_DATA_DIR=<租户根>/data <container> \
 ```
 
 失败（非零退出）时端侧抛 RuntimeError，stderr 截断 800 字符回显。
+
+### C2S-6 ~ C2S-9 HTTPS 上传 API（1.3.0 起，客户机通道）
+
+基址 = `config server.upload_url`（生产 `https://95188.pw/api/production/v1`）。
+鉴权：`Authorization: Bearer <upload_token>`（C2S-6 除外）。**tenant 由服务端
+从 token 解出**，任何请求不得携带 tenant 字段（携带即 400）。
+
+**C2S-6 能力声明**（无鉴权）：
+
+```
+GET /capabilities
+→ 200 {"service":"dashijie-production-upload","upload_contract":"1.3.0",
+       "chunk_max":67108864,"file_max":12884901888,"files_max":512,
+       "total_max_bytes":42998169600,"ttl_hours":48}
+```
+
+端侧 push 前预检 `upload_contract` 主次版本，低于本机契约 → 报错提示服务端待升级。
+
+**C2S-7 创建上传会话**：
+
+```
+POST /uploads
+{"session":"<场次名>","mode":"eval|video","run_eval":false,
+ "files":[{"path":"data/asr/<分片slug>/transcript.json","size":1234,
+           "sha256":"<hex>"}, …]}
+→ 201 {"upload_id":"…","tenant":"<token 所属租户>","expires_at":"…",
+        "chunk_max":…}
+```
+
+`path` 限**租户根相对路径**且**只含数据/源片文件**（manifest 走 C2S-9 请求体，
+不占文件清单——重跑时 pushed_at 变化不破坏清单签名，断点续传才成立）。
+白名单（服务端强制，越界 400 `invalid_path`）：
+
+| mode | 允许前缀 |
+| --- | --- |
+| eval | `data/asr/<段>/`、`data/reports/<段>_full/`、`data/knockdowns/<段>/`、`data/pickups/<段>/`、`data/voice/<段>/` 下的安全文件名 |
+| video | `sessions/<session>/video/<文件名>` |
+
+通用拒绝：绝对路径、`..` 段、`\`、控制字符、前导点段名、单段 >255 字节、
+总长 >1024、`files_max`/`file_max`/`total_max_bytes` 超限（413 `too_large`）。
+`session` 规则：非空、无 `/`、非 `.`/`..`、无控制字符、≤80 字符。
+上传数据落 `<租户根>/.staging/<upload_id>/`（TTL 48h，新建时清扫过期）。
+
+**C2S-8 分块上传 / 状态查询**：
+
+```
+PUT /uploads/<id>/files/<idx>?offset=N     # body=原始字节（一个分块）
+   Content-Length ≤ chunk_max；offset 必须等于该文件当前已收字节数
+→ 200 {"path":"…","received":<新累计>}
+   offset 不符 → 409 offset_mismatch（端侧 GET 状态对齐后续传）
+GET /uploads/<id>
+→ 200 {"state":"open|files_committed|imported|failed_import",
+       "session":"…","mode":"…",
+       "files":[{"path":"…","size":…,"received":…},…]}
+```
+
+分块为**严格追加**：短块/中断块不落盘，服务端 offset 永远停在完整块边界。
+idx = create 请求 `files[]` 的下标。
+
+**C2S-9 完成校验 + 自动 import**：
+
+```
+POST /uploads/<id>/complete
+{"manifest": {…§5.2 同构…}, "run_eval":false, "no_import":false}
+→ 200 {"state":"imported","upload_id":"…","session":"…","tenant":"…",
+       "remapped":N,"video_ready":bool,"log":"<import 输出尾部>"}
+```
+
+服务端动作（全过才入正式目录）：①逐文件 `received==size` 且实际 SHA-256
+复核（不符 → 422 `checksum_mismatch`，该文件清零重传）；②manifest 校验
+（dict；`contract_version`/`session`/`mode` 与会话一致）后由**服务端落盘**
+`sessions/<session>/manifest.json`；③staging 文件移入租户正式目录（覆盖
+同名，幂等）；④以 C2S-4 同形态 `docker exec` 触发 import-session
+（`run_eval` 且 mode=eval 时追加 eval，对应 C2S-5；`no_import=true` 跳过，
+state=files_committed）。重复 complete 幂等（import_session 幂等，manifest
+覆盖同义内容）。回执持久化于 `<租户根>/.staging/receipts/<upload_id>.json`
+（含 import 日志，供排障/对账）。import 失败不回滚文件：state=
+failed_import + 日志，端侧重跑同命令即重试 import。
+
+**错误约定**（全接口统一机器码，端侧按 code 分支、不匹配中文文案）：
+
+| HTTP | code | 端侧行为 |
+| --- | --- | --- |
+| 400 | invalid_path / invalid_request / tenant_forbidden_field | 修正清单，重建会话 |
+| 401 | invalid_token | 停止并提示 token 失效（联系运维换发） |
+| 403 | token_revoked | 同上 |
+| 404 | not_found | upload_id 失效（TTL/不存在）→ 重新 create |
+| 409 | offset_mismatch / state_conflict | GET 状态对齐后续传 / 提示 |
+| 413 | too_large | 分块或清单超限，报错 |
+| 422 | checksum_mismatch | 该文件从 0 重传 |
+| 5xx | — / upstream_unavailable | 退避重试（端侧默认 5 次，1/2/4/8/16s） |
+
+**SRV-4 upload-token 运维**（服务端宿主 CLI）：
+
+```
+python3 deploy/eval/upload_token.py issue <tenant> --label <装机标识>   # token 只显示一次
+python3 deploy/eval/upload_token.py revoke <token前8位|label>
+python3 deploy/eval/upload_token.py list
+```
+
+库存 SHA-256 于 `/opt/dashijie-eval-data/upload_tokens.json`（原子写；含
+tenant/label/created_at/revoked）。**token 即租户上传身份**，按台发放可按台
+吊销；统一账号（REQ-20261019-002/003）上线后本层替换为账号核验，接口形状不变。
 
 ### S2C-1 pull 成片+发布包
 
@@ -414,6 +528,8 @@ import-session 幂等重跑保留）。
 | SRV-1 | 无 manifest → FileNotFoundError | 幂等（精确匹配重映射） |
 | C2S-1 | 无任何可传产物 → RuntimeError | — |
 | C2S-2 | 源片缺失 → RuntimeError | — |
+| C2S-6~9 | 见 §4 错误约定表（机器码） | 会话按 offset 续传；complete 幂等；同清单重跑复用未过期 upload_id |
+| SRV-4 | token 不存在/已吊销 → CLI 报错 | issue 重复 label 追加多条（各有独立 token） |
 
 ---
 
@@ -437,6 +553,7 @@ import-session 幂等重跑保留）。
 
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
+| 2026-10-19 | 1.3.0 | C2S-6~9 / SRV-4 / §2.1 | 兼容性新增：受控 HTTPS 上传通道（`https://95188.pw/api/production/v1`，Bearer 租户 token，tenant 服务端解出、路径白名单、SHA-256 复核、分块断点续传、complete 自动 import/eval）；config 新增 `server.upload_url`/`upload_token`（非空即 HTTPS 通道，客户分发包不再携带 ssh 私钥/rsync）；rsync 通道保留内部机用，行为不变。接口形状对齐 REQ-20261019-003 拟议的 `/api/production/v1`，统一账号上线后仅替换鉴权层（REQ-20261019-005） |
 | 2026-10-14 | 1.2.0 | §5.1 | 兼容性新增：events.jsonl kind `loadout` 补齐 `meta.hero`（干员名）/`meta.weapons`（枪械名列表，局内多条按窗口聚合：hero 取首条、weapons 并集保序）。服务端逐场报告逐局表新增「干员」「枪械」两列，缺失显示 "-"。无新接口，push 通道与排除规则不变；旧端/旧场次不破坏（REQ-20261014-002） |
 | 2026-10-14 | 1.1.3 | §2.2 | `site_url` 由 `http://8.133.251.179/eval/` 改为 `http://8.153.157.239/eval/`（服务器迁移：新生产=8.153.157.239，旧 8.133.251.179 转测试环境；人用地址、非机器接口，勘误级变更，机器通道不受影响。端侧曾暂记 1.1.2，并轨顺延） |
 | 2026-09-21 | 1.1.2 | SRV-2 / SRV-3 / §5.3 | 兼容性新增：逐场报告线 `data/game_reports/<场次slug>/game_report.md`（与击倒/拾取/语音平级，仅统计本场次事件）；`session.json` `lines` 新增可选键 `report`（服务端写，manifest 不含，import 幂等保留，prune 连带删除）。端侧 manifest 无需改动（服务端曾记 1.1.0，端侧副本当时未同步，2026-10-14 并轨补录、编号顺延） |

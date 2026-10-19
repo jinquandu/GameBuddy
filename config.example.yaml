@@ -13,11 +13,19 @@ features:
 
 # ---- 应用端 <-> 服务端（ECS）搬运，接口契约见 docs/SERVER-INTERFACE.md ----
 server:
-  # tenant: my-tenant   # 租户名（字母数字-_，≤32 字）。不配置则首次 push/pull
-                        # 按装机时间自动生成 auto-YYYYMMDD-HHMMSS 并写回本文件
-  ssh_alias: ecs            # ~/.ssh/config 里的别名（push/pull 走 rsync over ssh）
+  # ===== 上传通道二选一（契约 1.3.0）=====
+  # A. 客户机（推荐/分发包默认）：受控 HTTPS 上传——不需要 ssh 私钥和 rsync，
+  #    tenant 由服务端从 token 解出（下面的 tenant/ssh_alias 均不参与）。
+  #    两项都配好才生效；upload_url 非空而 upload_token 缺失会直接报错（不回退 SSH）。
+  upload_url: https://95188.pw/api/production/v1
+  upload_token: ""            # 运维按租户发放（服务端 upload_token.py issue），
+                              # 装机时填入；泄露可单 token 吊销换发
+  # B. 内部机：rsync over ssh——upload_url 留空即走此通道，需要 ~/.ssh 别名 + rsync。
+  # tenant: my-tenant   # 租户名（字母数字-_，≤32 字，仅 rsync 通道）。不配置则首次
+                        # push/pull 按装机时间自动生成 auto-YYYYMMDD-HHMMSS 并写回本文件
+  ssh_alias: ecs            # ~/.ssh/config 里的别名（rsync 通道 push/pull 用）
   remote_root: /opt/dashijie-eval-data   # 服务端稳定数据根（部署包外，更新不删）
-  container: dashijie-eval  # 服务端跑 toolbox 的容器（push 触发 import/eval 用）
+  container: dashijie-eval  # 服务端跑 toolbox 的容器（rsync 通道触发 import/eval 用）
   site_url: http://8.153.157.239/eval/
   keep_sessions: 3          # 服务端 prune 默认保留最近 N 个会话
 
