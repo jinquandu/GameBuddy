@@ -420,46 +420,54 @@ python3 -m toolbox sessions [list|prune] [--keep N] [--tenant <t>]
    本清单为**公共子集**；各接口专属错误码以各节定义为准（如 C2S-10 的
    `409 device_bound`），端侧不得对未列举 code 做崩溃处理。
 
-### DSJ-PC-1 规范细则（2026-10-19 随端侧实现补录；冻结条款的必要细化，非形状变更）
+### DSJ-PC-1 规范细则（2026-10-19 二次修正：对齐原始规范实现）
 
-**签名规范化串**（UTF-8，`\n` 连接的 9 行；验证前不得重排序/重序列化）：
+> 首次补录时原始素材灭失、规范系重建；同日素材回归交接
+> （`交接/20261019-account-device/`，account_service/device_auth.py 为验签
+> 权威实现），经对照**以原始规范为准**重写本节（未实施前的对齐修正，
+> 1.4.0 未上线无兼容负担；台账已登记）。
+
+**签名规范化串**（UTF-8，`
+` 连接的 **8 行**；`path` 为线上原样 path
+**含 query 一体**，验证前不得重序列化）：
 
 ```
 DSJ-PC-1
 <METHOD 大写>
-<raw path>            # 原样 path（以 / 开头，不含 query）
-<raw query>           # 原样 query 串，无则空行
-<sha256_hex(body)>    # body 空 = sha256(b"") 的 hex
-<sha256_hex(bearer)>  # bearer 字符串 UTF-8 的 sha256 hex；无会话 = sha256(b"")
-<device_id>
-<ts>                  # Unix 秒（int）
-<nonce>               # 16 字节 urlsafe ASCII，一次性
+<raw path 含 query>       # 无 query 即 path 本身
+<sha256_hex(body)>        # body 空 = sha256(b"") 的 hex
+<sha256_hex(bearer)>      # bearer UTF-8 的 sha256 hex；无会话 = sha256(b"")
+<device_id>               # sha256(原始公钥 32B) hex 前 32 位（无前缀）
+<ts>                      # Unix 秒；验证窗 ±300s
+<nonce>                   # 32 字符 hex（token_hex(16)），一次性
 ```
 
-签名 = 安装密钥（Ed25519）对上述字节串的签名。请求头：
+**请求头**（签名 = Ed25519 对上述字节串的签名，公钥随头携带——服务端
+不依赖登录登记即可验任何请求）：
 
 | 头 | 值 |
 | --- | --- |
-| `X-DSJ-Device` | device_id |
-| `X-DSJ-Timestamp` | ts（与规范化串同值） |
-| `X-DSJ-Nonce` | nonce |
-| `X-DSJ-Signature` | 签名的 base64url（无填充） |
+| `X-DSJ-Device-Id` | device_id（32 hex） |
+| `X-DSJ-Device-Key` | 原始公钥 base64url（43 字符） |
+| `X-DSJ-Device-Time` | ts |
+| `X-DSJ-Device-Nonce` | nonce |
+| `X-DSJ-Device-Signature` | 签名 base64url（86 字符） |
 
-**device_id** = `dv-` + sha256(原始公钥 32 字节) hex 前 32 位；安装密钥
-Ed25519，Windows 下私钥经 DPAPI 落盘（`data/.device/key.bin`），非 Windows
-平台 0600 明文（仅开发环境）。
+**展示码**（UI 用，非传输字段）：`DSJ-` + device_id 按 8 位分组大写连字符。
+**防重放**：nonce 按 device 记账一次性消费；未来时间戳的 nonce 保留至其
+窗口尾（stamp+301）。**密钥落盘**：Windows DPAPI（文件名 `pc-device-v1.dpapi`，
+硬链接原子创建防并发双写）；非 Windows 不落盘（仅测试态）。
 
-**C2S-10 login 请求体**（请求本身带上述签名头；服务端以 body 内
-`public_key` 验签，并核对 `device_id == dv-摘要(public_key)`）：
+**C2S-10 登录流（challenge 两步，对齐既有实现）**：
 
 ```
-{ "client":"pc", "phone":"…", "sms_code":"…", "device_id":"dv-…",
-  "public_key":"<base64url 原始公钥>", "replace_device": false }
-→ 200 { "user_id":…, "bearer":"…", "expires_at":"…" }
+POST /api/account/v1/sms      {"phone":"…"}（带五签名头）
+→ 200 {"challenge_id":"…", …}
+POST /api/account/v1/login    {"challenge_id":"…","code":"…","client":"pc",
+                               "device_id":"<32hex>","replace_device":false}
+→ 200 {"access_token":"<43字符>","expires_in":<秒,≤604800>,"user":{…}}
   已绑其他设备 → 409 device_bound（附现绑设备摘要）
 ```
-
-短信下发沿用既有 `POST /api/account/v1/sms`（请求同样带签名头）。
 
 **C2S-12 production-jobs 请求体**（签名头 + 账号 Bearer）：
 
@@ -759,6 +767,7 @@ import-session 幂等重跑保留）。
 | 2026-10-19 | 1.3.0 | C2S-6~9 / SRV-4 / §2.1 | 兼容性新增：受控 HTTPS 上传通道（`https://95188.pw/api/production/v1`，Bearer 租户 token，tenant 服务端解出、路径白名单、SHA-256 复核、分块断点续传、complete 自动 import/eval）；config 新增 `server.upload_url`/`upload_token`（非空即 HTTPS 通道，客户分发包不再携带 ssh 私钥/rsync）；rsync 通道保留内部机用，行为不变。接口形状对齐 REQ-20261019-003 拟议的 `/api/production/v1`，统一账号上线后仅替换鉴权层（REQ-20261019-005） |
 | 2026-10-19 | 1.4.0（冻结） | §4A / C2S-10~14 / INT-1~3 | **接口定义冻结（按用户指示，冻结≠实施，线上契约仍 1.3.0，CONTRACT_VERSION 随双端实施发版升至 1.4.0）**；冻结后接口形状/编号/错误语义不再可改，变更须走 §0 版本纪律。同时落实端侧三条评审意见：①总则 #6 明确错误码清单为公共子集、接口专属码（如 409 device_bound）以各节为准；②INT-3 增归属落盘细则（账号鉴权实施起 create 的 meta.json/receipts 增记 owner user_id）；③确认投稿/收片接口有意后置（C2S-15 起另行起草，关联 REQ-004），非本节遗漏 |
 | 2026-10-19 | 1.3.1（勘误） | §5.1 | events.jsonl loadout 历史数据形态勘误：2026-09 及更早场次实测存在 weapons=[{name,type,reads}]（dict 列表）第三形态，消费方须容错 [str]/[dict]/缺失（dict 取 name，hero 同理）。源出联调实测：旧场次 push --run-eval 时服务端 report.py join 崩溃（REQ-20261019-006）。纯文档勘误，CONTRACT_VERSION 常量不变 | 
+| 2026-10-19 | 1.4.0（细则修正） | §4A DSJ-PC-1 规范细则 | 素材回归交接后对照修正：规范化串定为 8 行（path 含 query 一体）；请求头改为 X-DSJ-Device-Id/Key/Time/Nonce/Signature 五头（公钥随头，服务端免登记验签）；device_id=sha256(公钥)前 32 hex 无前缀（展示码 DSJ-8×4 大写）；nonce 32hex 一次性、时间窗 ±300s；C2S-10 登录流对齐 challenge 两步（sms→challenge_id→login，access_token/expires_in/user）。1.4.0 未实施，无兼容负担（REQ-20261019-002 对照审阅结论） | [REQ-20261019-002](需求/REQ-20261019-002-GameBuddy统一账号与设备鉴权集成.md) |
 | 2026-10-19 | 1.4.0（细则补录） | §4A DSJ-PC-1 规范细则 | 随端侧实现（REQ-002 路径③，用户指示）补录签名规范化串（9 行 LF 连接：method/raw path/raw query/body 与 bearer 的 sha256 hex/device_id/ts/nonce）、签名头（X-DSJ-Device/Timestamp/Nonce/Signature）、device_id 算式（dv-+sha256(公钥)前32位）、C2S-10/12 请求体与 C2S-13 响应最小 schema——冻结条款的必要细化，形状/编号/错误语义未变 | [REQ-20261019-002](../cut_kb/需求/REQ-20261019-002-GameBuddy统一账号与设备鉴权集成.md) |
 | 2026-10-19 | 1.4.0（草案） | §4A / C2S-10~14 / INT-1~3 / §2.1 | **草案，未冻结未实施，线上契约仍 1.3.0**：统一账号与生产准入接口全集（PC 设备鉴权登录/能力声明/生产申请、生产任务查询与受控产物读取、内部原请求核验/任务提交/回执查询），含 DSJ-PC-1 签名总则、双凭证不混用、授权不缓存、`(user_id,request_id)` 幂等、稳定错误语义、INT 编号族（新增）。为旧工作副本未发布 1.4.0 与线上 1.3.0 的逐项合并起点。冻结实施时 CONTRACT_VERSION → 1.4.0（REQ-20261019-003，服务端依据需求起草，待端侧收编权威版+三方评审） |
 | 2026-10-14 | 1.2.0 | §5.1 | 兼容性新增：events.jsonl kind `loadout` 补齐 `meta.hero`（干员名）/`meta.weapons`（枪械名列表，局内多条按窗口聚合：hero 取首条、weapons 并集保序）。服务端逐场报告逐局表新增「干员」「枪械」两列，缺失显示 "-"。无新接口，push 通道与排除规则不变；旧端/旧场次不破坏（REQ-20261014-002） |
