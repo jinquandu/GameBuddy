@@ -11,6 +11,7 @@ import hashlib
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from toolbox.config import DATA
@@ -43,18 +44,29 @@ def file_sha256(path, block=4 * 1024 * 1024):
 
 
 class ProductionUploader:
-    def __init__(self, base_url, token, chunk=DEFAULT_CHUNK, echo=print):
+    def __init__(self, base_url, token=None, chunk=DEFAULT_CHUNK, echo=print,
+                 signer=None):
         self.base = base_url.rstrip("/")
         self.token = token
         self.chunk = chunk
         self.echo = echo
+        # 鉴权层可插拔（契约 §4A「与既有接口的关系」）：1.3.0 租户 token 用
+        # token；账号模式（1.4.0 实施）经 signer 附加 DSJ-PC-1 签名头并
+        # 由服务端 INT-1 核验——接口形状不变，鉴权层置换在此挂接
+        self.signer = signer
 
     # ------------------------------------------------------------ HTTP 基座
 
     def _request(self, method, path, body=None, data=None, timeout=600):
         """body=dict 走 JSON；data=bytes 原样（分块 PUT）。非 2xx 一律
         UploadError（含服务端 {"error":{"code","message"}} 解析）。"""
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = {}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        if self.signer:
+            # 签「线上原样 path」：base 路径前缀 + 相对 path（与 account 同口径）
+            wire = urllib.parse.urlsplit(self.base).path + path
+            headers.update(self.signer(method, wire, data or b""))
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"

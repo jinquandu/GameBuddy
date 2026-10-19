@@ -82,6 +82,13 @@ DEFAULTS = {
         "site_url": "http://8.153.157.239/eval/", # 打标站地址（域名失效，改公网 IP）
         "keep_sessions": 3,                       # 服务端保留最近 N 个会话（prune 默认值）
     },
+    "account": {
+        # ---- 统一账号（契约 §4A，1.4.0 冻结；C2S-10~14）----
+        # 服务端能力未就绪时（health 未声明 pc_device_auth_contract=1.0）
+        # 端侧一律"服务待就绪"，不降级不绕过（toolbox/account.py 门控）。
+        "api_url": "https://95188.pw/api/account/v1",
+        "production_url": "",  # C2S-13/14 生产查询基址；空=由 api_url 推导
+    },
 }
 
 

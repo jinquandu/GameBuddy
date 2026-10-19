@@ -6,6 +6,9 @@
 # 配置/模板解析
 pyyaml>=6.0
 
+# 设备身份与请求签名（toolbox/device_identity.py，Ed25519+DPAPI；契约 §4A）
+cryptography>=42.0
+
 # 逐帧行为识别（toolbox/detector.py，python3 -m toolbox detect）
 numpy>=1.24
 opencv-python-headless>=4.8
