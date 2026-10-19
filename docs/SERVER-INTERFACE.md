@@ -599,6 +599,14 @@ JSONL，每行一个事件，write-once（文件存在即为完整结论）：
 供端侧本地逐局表渲染与排障，服务端消费方可忽略。旧场次（≤1.1.x）meta 仅
 含源数据字段、无 hero/weapons，消费方按缺失处理显示 `-`。
 
+> **历史数据形态勘误（2026-10-19 联调实测，1.3.1）**：2026-09 及更早场次
+> 实测存在第三种形态——`weapons` 为 **dict 列表**
+> `[{name,type,reads},…]`（当时 detect 的产出），并非只有「无 weapons」
+> 一种旧形态。消费方（服务端 report/eval 等）须同时容错
+> **[str] / [dict] / 缺失** 三种：dict 取 `name`；`hero` 同理防御
+> （str / dict 取 `name` / 缺失）。CONTRACT_VERSION 常量不变（纯文档勘误，
+> 见 §8 changelog 1.3.1 行）。
+
 示例行：
 
 ```json
@@ -750,6 +758,7 @@ import-session 幂等重跑保留）。
 | --- | --- | --- | --- |
 | 2026-10-19 | 1.3.0 | C2S-6~9 / SRV-4 / §2.1 | 兼容性新增：受控 HTTPS 上传通道（`https://95188.pw/api/production/v1`，Bearer 租户 token，tenant 服务端解出、路径白名单、SHA-256 复核、分块断点续传、complete 自动 import/eval）；config 新增 `server.upload_url`/`upload_token`（非空即 HTTPS 通道，客户分发包不再携带 ssh 私钥/rsync）；rsync 通道保留内部机用，行为不变。接口形状对齐 REQ-20261019-003 拟议的 `/api/production/v1`，统一账号上线后仅替换鉴权层（REQ-20261019-005） |
 | 2026-10-19 | 1.4.0（冻结） | §4A / C2S-10~14 / INT-1~3 | **接口定义冻结（按用户指示，冻结≠实施，线上契约仍 1.3.0，CONTRACT_VERSION 随双端实施发版升至 1.4.0）**；冻结后接口形状/编号/错误语义不再可改，变更须走 §0 版本纪律。同时落实端侧三条评审意见：①总则 #6 明确错误码清单为公共子集、接口专属码（如 409 device_bound）以各节为准；②INT-3 增归属落盘细则（账号鉴权实施起 create 的 meta.json/receipts 增记 owner user_id）；③确认投稿/收片接口有意后置（C2S-15 起另行起草，关联 REQ-004），非本节遗漏 |
+| 2026-10-19 | 1.3.1（勘误） | §5.1 | events.jsonl loadout 历史数据形态勘误：2026-09 及更早场次实测存在 weapons=[{name,type,reads}]（dict 列表）第三形态，消费方须容错 [str]/[dict]/缺失（dict 取 name，hero 同理）。源出联调实测：旧场次 push --run-eval 时服务端 report.py join 崩溃（REQ-20261019-006）。纯文档勘误，CONTRACT_VERSION 常量不变 | 
 | 2026-10-19 | 1.4.0（细则补录） | §4A DSJ-PC-1 规范细则 | 随端侧实现（REQ-002 路径③，用户指示）补录签名规范化串（9 行 LF 连接：method/raw path/raw query/body 与 bearer 的 sha256 hex/device_id/ts/nonce）、签名头（X-DSJ-Device/Timestamp/Nonce/Signature）、device_id 算式（dv-+sha256(公钥)前32位）、C2S-10/12 请求体与 C2S-13 响应最小 schema——冻结条款的必要细化，形状/编号/错误语义未变 | [REQ-20261019-002](../cut_kb/需求/REQ-20261019-002-GameBuddy统一账号与设备鉴权集成.md) |
 | 2026-10-19 | 1.4.0（草案） | §4A / C2S-10~14 / INT-1~3 / §2.1 | **草案，未冻结未实施，线上契约仍 1.3.0**：统一账号与生产准入接口全集（PC 设备鉴权登录/能力声明/生产申请、生产任务查询与受控产物读取、内部原请求核验/任务提交/回执查询），含 DSJ-PC-1 签名总则、双凭证不混用、授权不缓存、`(user_id,request_id)` 幂等、稳定错误语义、INT 编号族（新增）。为旧工作副本未发布 1.4.0 与线上 1.3.0 的逐项合并起点。冻结实施时 CONTRACT_VERSION → 1.4.0（REQ-20261019-003，服务端依据需求起草，待端侧收编权威版+三方评审） |
 | 2026-10-14 | 1.2.0 | §5.1 | 兼容性新增：events.jsonl kind `loadout` 补齐 `meta.hero`（干员名）/`meta.weapons`（枪械名列表，局内多条按窗口聚合：hero 取首条、weapons 并集保序）。服务端逐场报告逐局表新增「干员」「枪械」两列，缺失显示 "-"。无新接口，push 通道与排除规则不变；旧端/旧场次不破坏（REQ-20261014-002） |
