@@ -501,6 +501,13 @@ def build_parser():
 
 
 def main(argv=None):
+    for s in (sys.stdout, sys.stderr):
+        enc = getattr(s, "encoding", None)   # --windowed 无管道时为 None
+        if enc and enc.lower() != "utf-8":
+            # 冻结 exe 忽略 PYTHONUTF8/PYTHONIOENCODING（引导器剥离 PYTHON*
+            # 环境变量），中文 stdout/stderr 落 GBK——folder_watch/pet 按
+            # UTF-8 读取即成乱码。入口处强制统一 UTF-8（覆盖全部子命令）。
+            s.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
     ensure_dirs()
     try:
