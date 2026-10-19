@@ -3,6 +3,13 @@ rem Core-only exe build (no ASR voice stack: torch/funasr excluded;
 rem pipeline auto-skips asr/speaker/voice, OCR knockdown/pickup/push intact).
 rem Output: dist\DashijiePet\DashijiePet.exe (onedir - ship the whole folder,
 rem put config.yaml next to the exe).
+rem GOTCHA 1: close every process touching dist\DashijiePet before building
+rem (running app instances, tail/viewer on data\logs\*). COLLECT wipes the dir;
+rem a locked file aborts it midway - exe deleted, _internal half-built (seen
+rem 2026-10-19: a log viewer holding pipeline.log).
+rem GOTCHA 2: this script's final echo is unconditional - always verify BOTH
+rem dist\DashijiePet\DashijiePet.exe and dist\DashijiePet-core.zip exist with
+rem fresh mtimes after running.
 cd /d "%~dp0"
 py -3 -m PyInstaller --noconfirm --clean --windowed --name DashijiePet ^
   --collect-data rapidocr_onnxruntime ^
