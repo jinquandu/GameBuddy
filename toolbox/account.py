@@ -34,6 +34,34 @@ class ServiceNotReady(AccountError):
                          f"账号服务暂不支持 PC 设备登录（{detail}）")
 
 
+class NotLoggedIn(AccountError):
+    """识别链路登录门控未过（REQ-20261019-013）。"""
+
+    def __init__(self):
+        super().__init__("not_logged_in",
+                         "请先在桌宠界面登录后再跑识别链路", 401)
+
+
+def require_login(config=None):
+    """识别链路登录门控（REQ-20261019-013）。
+
+    account.api_url 已配置（账号模式）且无有效会话 → NotLoggedIn；
+    未配置账号服务（内部机）不门控；account.gate_pipeline=false 关闭
+    （开发逃生门）。会话有效性与 AccountClient._bearer 同口径：
+    bearer 存在且未过期；过期会话不在此清（_bearer/summary 自会清）。"""
+    if config is None:
+        from toolbox.config import load_config
+        config = load_config()
+    acct = config.get("account") or {}
+    if not acct.get("api_url") or acct.get("gate_pipeline") is False:
+        return {}
+    sess = di.load_session()
+    exp = sess.get("expires_at_ts")
+    if sess.get("bearer") and exp and exp > time.time() + 30:
+        return sess
+    raise NotLoggedIn()
+
+
 class AccountClient:
     def __init__(self, api_url, production_url=None):
         self.api = api_url.rstrip("/")

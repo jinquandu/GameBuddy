@@ -36,6 +36,16 @@ server:
 account:
   api_url: https://95188.pw/api/account/v1
   # production_url: ""      # C2S-13/14 生产查询基址；留空=由 api_url 推导
+  # gate_pipeline: true     # 识别链路登录门控（REQ-20261019-013）：配了 api_url
+                           # 即默认开启；内部机/开发可设 false 关闭
+
+# ---- 录像目录后台日任务（REQ-20261019-013，UI 无监控行）----
+folder_watch:
+  # watch_dir: "D:/录像"    # 监控目录（场次子目录/散装视频均可）；留空=不启用。
+                           # 稳定录像（写入完静置）每日自动跑一轮识别链+上传
+  daily_hour: 4            # 每日运行时刻（0-23，本地时区）；错过当刻启动时补跑，
+                           # 当日只跑一次（去重标记持久化）
+  stable_min: 10           # 视频静置判稳分钟数（写入中不处理）
 
 # ---- B站直播录制（toolbox record）----
 recorder:

@@ -38,8 +38,10 @@ def _voice_line_ready(config):
 
 def run_pipeline(target, config=None, skip=(), run_eval=False):
     """按阶段顺序跑，已有产物自动复用（各链路自身幂等）。返回各阶段耗时。"""
+    from toolbox.account import require_login
     from toolbox.config import load_config
     config = config or load_config()
+    require_login(config)               # 登录门控（REQ-20261019-013）
     skip = set(skip)
     spent = {}
 

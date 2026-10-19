@@ -252,3 +252,18 @@ def summary():
         elif j["state"] == "failed":
             out["failed"].append(j["session"])
     return out
+
+
+# ---------------- 后台日任务标记（REQ-20261019-013：一天恰好一轮） ----------------
+
+def last_daily_run():
+    """最近一次后台日任务的日期（YYYY-MM-DD）；未跑过返回 ""。"""
+    return str(_load().get("last_daily", ""))
+
+
+def mark_daily_run():
+    """标记今日已跑（原子写，与队列同文件持久化）。"""
+    import datetime
+    state = _load()
+    state["last_daily"] = datetime.date.today().isoformat()
+    _save(state)

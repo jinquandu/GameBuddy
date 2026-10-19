@@ -215,9 +215,9 @@ class PetWindow(tk.Tk):
         self._snap_queue = []
         hist = self._load_hist()
         self.run_eval_var = tk.BooleanVar(value=hist["run_eval"])
-        self.watch_dir = hist.get("watch_dir", "")
-        self.watch_stop = threading.Event()
-        self.watch_thread = None
+        self.watch_dir = hist.get("watch_dir", "")   # 后台日任务的目录兜底
+        self.daily_stop = threading.Event()
+        self.daily_thread = None
 
         self._build()
         if address:
@@ -228,7 +228,7 @@ class PetWindow(tk.Tk):
         self._place_bottom_right()
         self.bind("<Unmap>", self._on_unmap)   # 最小化 → 托盘
         self._acct_refresh()
-        self._watch_render()
+        self._daily_start()
         # 点 X 必须走 _on_close：Tk 默认销毁会绕过杀链/存历史/退托盘，
         # 跑链子进程成孤儿继续烧 CPU
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -261,18 +261,8 @@ class PetWindow(tk.Tk):
         self.acct_btn = ttk.Button(acct, text="登录", width=7,
                                    command=self._acct_click)
         self.acct_btn.pack(side="right")
-        # 监控行（folder_watch：稳定录像自动入队跑链+推送）
-        watch = ttk.Frame(f)
-        watch.pack(fill="x", pady=(0, 8))
-        self.watch_lab = tk.Label(watch, text="监控：未设置", bg=C["bg"],
-                                  fg=C["dim"], font=(FONT, 9), anchor="w")
-        self.watch_lab.pack(side="left", fill="x", expand=True)
-        self.watch_btn = ttk.Button(watch, text="选目录", width=8,
-                                    command=self._watch_pick)
-        self.watch_btn.pack(side="right", padx=(6, 0))
-        self.watch_toggle_btn = ttk.Button(watch, text="▶ 监控", width=8,
-                                           command=self._watch_toggle)
-        self.watch_toggle_btn.pack(side="right")
+        # 目录监控已退后台日任务（REQ-20261019-013）：不再有监控行，
+        # 目录经 config folder_watch.watch_dir 配置，每日一轮自动跑链
         self.status_lab = tk.Label(f, text="", bg=C["bg"], fg=C["dim"],
                                    font=(FONT, 9), anchor="w", wraplength=W - 48,
                                    justify="left")
@@ -345,85 +335,65 @@ class PetWindow(tk.Tk):
             self.acct_lab.config(text="账号：未登录", fg=C["dim"])
             self.acct_btn.config(text="登录")
 
-    # ---------- 目录监控（toolbox/folder_watch.py）
+    # ---------- 目录监控（后台日任务，REQ-20261019-013）
+    #
+    # UI 监控行已移除；pet 常驻进程内每日跑一轮「扫描入队→顺序跑完队列」，
+    # 目录取 config folder_watch.watch_dir（历史 watch_dir 兜底迁移），
+    # 无目录则任务不启动。错过当天时刻（daily_hour，默认 4 点）启动即补跑；
+    # 当日已跑标记持久化在 .folder_watch.json（last_daily），一天恰好一轮。
 
-    def _watch_pick(self):
-        d = filedialog.askdirectory(
-            initialdir=self.watch_dir or str(ROOT / "video"),
-            title="选择录像监控目录（稳定后自动跑链+推送）")
-        if d:
-            self.watch_dir = str(Path(d))
-            self._watch_render()
-            self._save_hist()
-
-    def _watch_render(self):
-        if not self.watch_dir:
-            self.watch_lab.config(text="监控：未设置", fg=C["dim"])
-            self.watch_toggle_btn.config(text="▶ 监控")
+    def _daily_start(self):
+        if self.daily_thread and self.daily_thread.is_alive():
             return
-        on = self.watch_thread is not None and self.watch_thread.is_alive()
-        try:
-            from toolbox.folder_watch import summary
-            s = summary()
-            bits = []
-            if s["queued"]:
-                bits.append(f"待{s['queued']}")
-            if s["running"]:
-                bits.append(f"跑{s['running']}")
-            if s["done"]:
-                bits.append(f"成{s['done']}")
-            if s["failed"]:
-                bits.append(f"败{len(s['failed'])}")
-            extra = ("（" + " ".join(bits) + "）") if bits else ""
-        except Exception:                       # noqa: BLE001 显示尽力而为
-            extra = ""
-        self.watch_lab.config(
-            text=f"监控{'▶ ' if on else ''}：{Path(self.watch_dir).name[:14]}{extra}",
-            fg=C["fg"] if on else C["dim"])
-        self.watch_toggle_btn.config(text="■ 停止" if on else "▶ 监控")
-
-    def _watch_toggle(self):
-        if self.watch_thread and self.watch_thread.is_alive():
-            self.watch_stop.set()
-            self._flash("监控停止（当前任务跑完即止）", C["dim"])
-            self._watch_render()
-            return
-        if not self.watch_dir:
-            self._flash("先选监控目录", C["warn"])
-            return
-        self.watch_stop.clear()
-        self.watch_thread = threading.Thread(target=self._watch_loop,
+        self.daily_stop.clear()
+        self.daily_thread = threading.Thread(target=self._daily_loop,
                                              daemon=True)
-        self.watch_thread.start()
-        self._watch_render()
-        self._flash(f"监控启动：{Path(self.watch_dir).name}", C["accent"])
-        LOG.info("目录监控启动：%s", self.watch_dir)
+        self.daily_thread.start()
 
-    def _watch_loop(self):
-        """后台节拍：扫稳定→顺序跑一个任务→休眠 scan_min。UI 更新一律
-        after() 回主线程（账号代次/UI 线程安全，REQ-002 C）。"""
+    def _daily_loop(self):
+        import datetime
+
         import toolbox.folder_watch as fw
         from toolbox.config import load_config
-        interval = int((load_config().get("folder_watch") or {})
-                       .get("scan_min", 15)) * 60
-        while not self.watch_stop.is_set():
-            try:
-                new, results = fw.process_pending(self.watch_dir)
-            except Exception as e:              # noqa: BLE001 单拍失败不杀循环
-                LOG.warning("目录监控节拍失败：%s", e)
-                new, results = 0, []
-            if new or results:
-                LOG.info("目录监控：入队 %d，完成 %d", new, len(results))
-                for session, ok, log in results:
-                    (LOG.info if ok else LOG.warning)(
-                        "目录监控任务%s：%s%s", "成功" if ok else "失败", session,
-                        "" if ok else f"（{log[-200:]}）")
-                self.after(0, self._watch_render)
-                if any(not ok for _, ok, _ in results):
-                    self.after(0, lambda: self._flash(
-                        "监控：有任务失败，详见 pet.log", C["warn"]))
-            self.watch_stop.wait(timeout=interval)
-        self.after(0, self._watch_render)
+        cfg = load_config().get("folder_watch") or {}
+        wdir = cfg.get("watch_dir") or self.watch_dir
+        if not wdir:
+            LOG.info("后台日任务未配置目录（folder_watch.watch_dir），不启动")
+            return
+        hour = int(cfg.get("daily_hour", 4))
+        LOG.info("后台日任务就绪：%s（每日 %02d:00 一轮，错过启动补跑）",
+                 wdir, hour)
+        while not self.daily_stop.is_set():
+            now = datetime.datetime.now()
+            ran_today = fw.last_daily_run() == now.date().isoformat()
+            if not ran_today and now.hour >= hour:
+                LOG.info("后台日任务开始：%s", wdir)
+                try:
+                    n_ok, n_fail = self._daily_pass(wdir)
+                    LOG.info("后台日任务完成：成功 %d / 失败 %d", n_ok, n_fail)
+                    if n_ok or n_fail:
+                        self.after(0, lambda ok=n_ok, fl=n_fail: self._flash(
+                            f"后台处理完成：成{ok} 败{fl}（详见 pet.log）",
+                            C["warn"] if fl else C["dim"]))
+                except Exception as e:          # noqa: BLE001 单日失败不杀线程
+                    LOG.warning("后台日任务失败：%s", e)
+                fw.mark_daily_run()
+            self.daily_stop.wait(timeout=600)   # 10 分钟粒度检查当日是否到期
+
+    def _daily_pass(self, wdir):
+        """跑完当前全部就绪任务（顺序，单日上限 100 保护）。"""
+        import toolbox.folder_watch as fw
+        n_ok = n_fail = 0
+        for _ in range(100):
+            new, results = fw.process_pending(wdir)
+            if not results:
+                break
+            for session, ok, log in results:
+                n_ok, n_fail = n_ok + ok, n_fail + (not ok)
+                (LOG.info if ok else LOG.warning)(
+                    "后台任务%s：%s%s", "成功" if ok else "失败", session,
+                    "" if ok else f"（{log[-200:]}）")
+        return n_ok, n_fail
 
     # ---------- 托盘（最小化驻留右下角通知区）
 
@@ -520,6 +490,22 @@ class PetWindow(tk.Tk):
         self._toggle_run()
 
     def _start(self, addr, skip=()):
+        # 登录门控（REQ-20261019-013）：未登录先弹登录框，成功则继续开跑
+        try:
+            from toolbox.account import require_login
+            require_login()
+        except Exception as e:                  # noqa: BLE001 门控拒绝即返回
+            self._flash(str(e).split("] ", 1)[-1], C["warn"])
+            api, prod = self._acct_cfg()
+            if api:
+                from toolbox.account_ui import login_dialog
+                if login_dialog(self, api, prod):
+                    self._acct_refresh()
+                    self._flash("登录成功，继续…", C["accent"])
+                else:
+                    return
+            else:
+                return
         self._save_hist()
         self.parser = ProgressParser()
         self._logs = []
@@ -724,10 +710,10 @@ class PetWindow(tk.Tk):
         step()
 
     def _on_close(self):
-        # 监控线程的跑链子进程同样要树杀（防孤儿烧 CPU）
-        if self.watch_thread is not None and self.watch_thread.is_alive():
+        # 后台日任务的跑链子进程同样要树杀（防孤儿烧 CPU）
+        if self.daily_thread is not None and self.daily_thread.is_alive():
             import toolbox.folder_watch as fw
-            self.watch_stop.set()
+            self.daily_stop.set()
             fw.kill_current()
         if self.proc and self.proc.poll() is None:
             if not messagebox.askokcancel(
