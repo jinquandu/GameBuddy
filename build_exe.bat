@@ -27,7 +27,10 @@ rem and is overwritten on every rebuild.
 copy /y config.example.yaml dist\DashijiePet\config.yaml >nul
 rem zip the FOLDER (not its contents): keeps the top-level DashijiePet\
 rem dir inside the archive so extraction does not scatter files.
-powershell -NoProfile -Command "Compress-Archive -Path 'dist\DashijiePet' -DestinationPath 'dist\DashijiePet-core.zip' -Force"
+rem pre-delete: Compress-Archive -Force occasionally dies with
+rem "stream not readable" replacing an existing zip; fresh dest is reliable.
+if exist dist\DashijiePet-core.zip del /f dist\DashijiePet-core.zip
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\DashijiePet' -DestinationPath 'dist\DashijiePet-core.zip'"
 echo Output: dist\DashijiePet\DashijiePet.exe + dist\DashijiePet-core.zip
 echo zip embeds sanitized config.yaml with no tenant - first push/pull
 echo auto-assigns an install-time tenant auto-YYYYMMDD-HHMMSS
