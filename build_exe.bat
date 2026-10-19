@@ -32,5 +32,8 @@ rem "stream not readable" replacing an existing zip; fresh dest is reliable.
 if exist dist\DashijiePet-core.zip del /f dist\DashijiePet-core.zip
 powershell -NoProfile -Command "Compress-Archive -Path 'dist\DashijiePet' -DestinationPath 'dist\DashijiePet-core.zip'"
 echo Output: dist\DashijiePet\DashijiePet.exe + dist\DashijiePet-core.zip
-echo zip embeds sanitized config.yaml with no tenant - first push/pull
-echo auto-assigns an install-time tenant auto-YYYYMMDD-HHMMSS
+rem 2026-10-19 contract 1.3.0/1.4.0: config.example.yaml ships with
+rem upload_url preset (HTTPS customer channel) - ops fills upload_token
+rem at install (server upload_token.py issue); internal rsync machines
+rem comment upload_url out. Account login shows service-not-ready until
+rem the account service declares pc_device_auth_contract=1.0.

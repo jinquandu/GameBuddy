@@ -89,6 +89,13 @@ DEFAULTS = {
         "api_url": "https://95188.pw/api/account/v1",
         "production_url": "",  # C2S-13/14 生产查询基址；空=由 api_url 推导
     },
+    "folder_watch": {
+        # ---- 录像目录监控与自动跑链（toolbox/folder_watch.py，pet「监控」行）----
+        "stable_min": 10,      # 视频静置判定（分钟）：写入中的不提前处理
+        "scan_min": 15,        # 扫描周期（分钟）
+        "attempts_max": 3,     # 单任务自动重试上限（含租约超时回收），超限记 failed
+        "lease_min": 120,      # running 租约（分钟）：宿主崩溃后回队
+    },
 }
 
 

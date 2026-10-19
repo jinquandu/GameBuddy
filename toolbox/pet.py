@@ -215,6 +215,9 @@ class PetWindow(tk.Tk):
         self._snap_queue = []
         hist = self._load_hist()
         self.run_eval_var = tk.BooleanVar(value=hist["run_eval"])
+        self.watch_dir = hist.get("watch_dir", "")
+        self.watch_stop = threading.Event()
+        self.watch_thread = None
 
         self._build()
         if address:
@@ -224,6 +227,8 @@ class PetWindow(tk.Tk):
 
         self._place_bottom_right()
         self.bind("<Unmap>", self._on_unmap)   # 最小化 → 托盘
+        self._acct_refresh()
+        self._watch_render()
         # 点 X 必须走 _on_close：Tk 默认销毁会绕过杀链/存历史/退托盘，
         # 跑链子进程成孤儿继续烧 CPU
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -246,7 +251,28 @@ class PetWindow(tk.Tk):
                    command=self._browse).pack(side="left", padx=(6, 0))
         self.btn = ttk.Button(f, text="▶  开始跑链",
                               command=self._on_main_button)
-        self.btn.pack(fill="x", ipady=5, pady=(0, 8))
+        self.btn.pack(fill="x", ipady=5, pady=(0, 6))
+        # 账号行（契约 §4A；服务未就绪时登录窗如实提示，不降级不绕过）
+        acct = ttk.Frame(f)
+        acct.pack(fill="x", pady=(0, 2))
+        self.acct_lab = tk.Label(acct, text="账号：未登录", bg=C["bg"],
+                                 fg=C["dim"], font=(FONT, 9), anchor="w")
+        self.acct_lab.pack(side="left", fill="x", expand=True)
+        self.acct_btn = ttk.Button(acct, text="登录", width=7,
+                                   command=self._acct_click)
+        self.acct_btn.pack(side="right")
+        # 监控行（folder_watch：稳定录像自动入队跑链+推送）
+        watch = ttk.Frame(f)
+        watch.pack(fill="x", pady=(0, 8))
+        self.watch_lab = tk.Label(watch, text="监控：未设置", bg=C["bg"],
+                                  fg=C["dim"], font=(FONT, 9), anchor="w")
+        self.watch_lab.pack(side="left", fill="x", expand=True)
+        self.watch_btn = ttk.Button(watch, text="选目录", width=8,
+                                    command=self._watch_pick)
+        self.watch_btn.pack(side="right", padx=(6, 0))
+        self.watch_toggle_btn = ttk.Button(watch, text="▶ 监控", width=8,
+                                           command=self._watch_toggle)
+        self.watch_toggle_btn.pack(side="right")
         self.status_lab = tk.Label(f, text="", bg=C["bg"], fg=C["dim"],
                                    font=(FONT, 9), anchor="w", wraplength=W - 48,
                                    justify="left")
@@ -267,7 +293,8 @@ class PetWindow(tk.Tk):
         except (OSError, ValueError):
             d = {}
         return {"addresses": d.get("addresses", []),
-                "run_eval": bool(d.get("run_eval", False))}
+                "run_eval": bool(d.get("run_eval", False)),
+                "watch_dir": d.get("watch_dir", "")}
 
     def _save_hist(self):
         HIST.parent.mkdir(parents=True, exist_ok=True)
@@ -276,8 +303,127 @@ class PetWindow(tk.Tk):
         if addr:
             addrs.insert(0, addr)
         HIST.write_text(json.dumps(
-            {"addresses": addrs[:8], "run_eval": bool(self.run_eval_var.get())},
+            {"addresses": addrs[:8], "run_eval": bool(self.run_eval_var.get()),
+             "watch_dir": self.watch_dir},
             ensure_ascii=False, indent=1), encoding="utf-8")
+
+    # ---------- 账号（契约 §4A，C2S-10/11）
+
+    def _acct_cfg(self):
+        from toolbox.config import load_config
+        a = load_config().get("account") or {}
+        return a.get("api_url", ""), a.get("production_url") or None
+
+    def _acct_click(self):
+        from toolbox.account import AccountClient
+        api, prod = self._acct_cfg()
+        sess = AccountClient(api, prod).session_summary()
+        if sess:
+            AccountClient(api, prod).logout()
+            self._acct_refresh()
+            self._flash("已退出账号", C["dim"])
+            return
+        from toolbox.account_ui import login_dialog
+        got = login_dialog(self, api, prod)
+        self._acct_refresh()
+        if got:
+            self._flash(f"登录成功：{got.get('user_id', '?')}", C["accent"])
+
+    def _acct_refresh(self):
+        from toolbox.account import AccountClient
+        api, prod = self._acct_cfg()
+        try:
+            sess = AccountClient(api, prod).session_summary()
+        except Exception:                      # noqa: BLE001 状态行永不杀窗
+            sess = {}
+        if sess:
+            self.acct_lab.config(
+                text=f"账号：{sess.get('user_id', '?')}（{sess.get('phone', '')}）",
+                fg=C["fg"])
+            self.acct_btn.config(text="退出")
+        else:
+            self.acct_lab.config(text="账号：未登录", fg=C["dim"])
+            self.acct_btn.config(text="登录")
+
+    # ---------- 目录监控（toolbox/folder_watch.py）
+
+    def _watch_pick(self):
+        d = filedialog.askdirectory(
+            initialdir=self.watch_dir or str(ROOT / "video"),
+            title="选择录像监控目录（稳定后自动跑链+推送）")
+        if d:
+            self.watch_dir = str(Path(d))
+            self._watch_render()
+            self._save_hist()
+
+    def _watch_render(self):
+        if not self.watch_dir:
+            self.watch_lab.config(text="监控：未设置", fg=C["dim"])
+            self.watch_toggle_btn.config(text="▶ 监控")
+            return
+        on = self.watch_thread is not None and self.watch_thread.is_alive()
+        try:
+            from toolbox.folder_watch import summary
+            s = summary()
+            bits = []
+            if s["queued"]:
+                bits.append(f"待{s['queued']}")
+            if s["running"]:
+                bits.append(f"跑{s['running']}")
+            if s["done"]:
+                bits.append(f"成{s['done']}")
+            if s["failed"]:
+                bits.append(f"败{len(s['failed'])}")
+            extra = ("（" + " ".join(bits) + "）") if bits else ""
+        except Exception:                       # noqa: BLE001 显示尽力而为
+            extra = ""
+        self.watch_lab.config(
+            text=f"监控{'▶ ' if on else ''}：{Path(self.watch_dir).name[:14]}{extra}",
+            fg=C["fg"] if on else C["dim"])
+        self.watch_toggle_btn.config(text="■ 停止" if on else "▶ 监控")
+
+    def _watch_toggle(self):
+        if self.watch_thread and self.watch_thread.is_alive():
+            self.watch_stop.set()
+            self._flash("监控停止（当前任务跑完即止）", C["dim"])
+            self._watch_render()
+            return
+        if not self.watch_dir:
+            self._flash("先选监控目录", C["warn"])
+            return
+        self.watch_stop.clear()
+        self.watch_thread = threading.Thread(target=self._watch_loop,
+                                             daemon=True)
+        self.watch_thread.start()
+        self._watch_render()
+        self._flash(f"监控启动：{Path(self.watch_dir).name}", C["accent"])
+        LOG.info("目录监控启动：%s", self.watch_dir)
+
+    def _watch_loop(self):
+        """后台节拍：扫稳定→顺序跑一个任务→休眠 scan_min。UI 更新一律
+        after() 回主线程（账号代次/UI 线程安全，REQ-002 C）。"""
+        import toolbox.folder_watch as fw
+        from toolbox.config import load_config
+        interval = int((load_config().get("folder_watch") or {})
+                       .get("scan_min", 15)) * 60
+        while not self.watch_stop.is_set():
+            try:
+                new, results = fw.process_pending(self.watch_dir)
+            except Exception as e:              # noqa: BLE001 单拍失败不杀循环
+                LOG.warning("目录监控节拍失败：%s", e)
+                new, results = 0, []
+            if new or results:
+                LOG.info("目录监控：入队 %d，完成 %d", new, len(results))
+                for session, ok, log in results:
+                    (LOG.info if ok else LOG.warning)(
+                        "目录监控任务%s：%s%s", "成功" if ok else "失败", session,
+                        "" if ok else f"（{log[-200:]}）")
+                self.after(0, self._watch_render)
+                if any(not ok for _, ok, _ in results):
+                    self.after(0, lambda: self._flash(
+                        "监控：有任务失败，详见 pet.log", C["warn"]))
+            self.watch_stop.wait(timeout=interval)
+        self.after(0, self._watch_render)
 
     # ---------- 托盘（最小化驻留右下角通知区）
 
@@ -578,6 +724,11 @@ class PetWindow(tk.Tk):
         step()
 
     def _on_close(self):
+        # 监控线程的跑链子进程同样要树杀（防孤儿烧 CPU）
+        if self.watch_thread is not None and self.watch_thread.is_alive():
+            import toolbox.folder_watch as fw
+            self.watch_stop.set()
+            fw.kill_current()
         if self.proc and self.proc.poll() is None:
             if not messagebox.askokcancel(
                     "还在跑", "识别链仍在运行，退出会终止整条链，确定？"):
