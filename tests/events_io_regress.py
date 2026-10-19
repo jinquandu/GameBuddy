@@ -85,5 +85,29 @@ check("损坏文件被原子重写", len(healed) == 1
       and json.loads(healed[0])["detail"] == "击倒 目标9")
 check("重写后无 tmp 残留", not list(conv.parent.glob("*.tmp")))
 
+# ---- 6) 空报告 = 0 事件结论：三条获取路径一律复用，不重扫 ----
+# 2026-10-15 exe 实测 P1-1：0 事件分片曾因 knockdown 口径不认空文件，
+# 在该阶段整段重扫 474 秒（pickups 却秒级复用同一份报告）
+video4 = tmp / "标题D P2 04日05点06分.mp4"
+conv4 = tmp / (slug(video4.stem) + "_full") / "events.jsonl"
+conv4.parent.mkdir(parents=True, exist_ok=True)
+conv4.write_text("", encoding="utf-8")             # detect 扫完写出 0 条
+found4 = E.existing_events(video4)
+check("空规范报告复用(existing_events)", bool(found4)
+      and found4[0] == conv4.parent and found4[1] == [])
+rescanned.clear()
+out4 = E.events_for(video4, config=None)           # knockdown/pipeline 口径
+check("空规范报告复用(events_for 不重扫)",
+      out4 == [] and not rescanned)
+out4p = E.events_for_pickup(video4, config=None)   # pickup 口径
+check("空规范报告复用(events_for_pickup)",
+      out4p == [] and not rescanned)
+
+# ---- 7) 无任何报告：仍走现场检测（空文件≠不存在） ----
+video5 = tmp / "标题E P1 01日02点03分.mp4"
+rescanned.clear()
+E.events_for(video5, config=None)
+check("无报告才现场检测", len(rescanned) == 1)
+
 print("\n" + ("全部通过 ✅" if not FAIL else f"失败 {len(FAIL)} 项 ❌：{FAIL}"))
 sys.exit(1 if FAIL else 0)

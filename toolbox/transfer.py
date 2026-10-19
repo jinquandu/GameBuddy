@@ -55,8 +55,24 @@ def _canonical_rpt(video: Path):
 
 
 def _find_events_rpt(video: Path):
-    """按首行 src 匹配该分片的 events.jsonl 报告目录。优先级：规范 _full 名 >
-    其他 _full 目录 > 任意目录（历史裸名，可能只含小扫描子集）。"""
+    """找该分片的 events.jsonl 报告目录。规范 _full 目录存在即结论——
+    **空文件也是结论**（0 事件；原子写后文件存在即完整。2026-10-15 实测
+    空报告曾被登记成「无事件流」，manifest 误标 incomplete）；规范路径
+    不存在或首行损坏再按 src 匹配：其他 _full 目录 > 任意目录（历史裸名，
+    可能只含小扫描子集）。与 events.existing_events 同口径。"""
+    canonical = REPORTS / _canonical_rpt(video)
+    cfile = canonical / "events.jsonl"
+    if cfile.is_file():
+        lines = [l for l in cfile.read_text(encoding="utf-8").splitlines()
+                 if l.strip()]
+        if not lines:
+            return canonical
+        try:
+            json.loads(lines[0])
+        except json.JSONDecodeError:
+            pass                              # 首行损坏：落回 src 匹配
+        else:
+            return canonical
     if not REPORTS.exists():
         return None
     cands = []
@@ -72,7 +88,6 @@ def _find_events_rpt(video: Path):
             cands.append(rpt.parent)
     if not cands:
         return None
-    canonical = REPORTS / _canonical_rpt(video)
     if canonical in cands:
         return canonical
     full = [c for c in cands if c.name.endswith("_full")]
@@ -92,10 +107,13 @@ def discover_session(session):
     for v in videos:
         asr_dir = find_transcript_dir(v)
         rpt = _find_events_rpt(v)
+        # missing 文案会写入 manifest.json 给打标站看，用全名（2026-10-15
+        # 实测 [:30] 把长中文名连扩展名一起截掉）；控制台打印截断是纯显示
+        # 层，各链路 [:36] 维持原样
         if not asr_dir:
-            missing.append(f"{v.name[:30]}：无 ASR 转写（先跑 toolbox asr）")
+            missing.append(f"{v.name}：无 ASR 转写（先跑 toolbox asr）")
         if not rpt:
-            missing.append(f"{v.name[:30]}：无事件流（先跑 toolbox detect）")
+            missing.append(f"{v.name}：无事件流（先跑 toolbox detect）")
         entry = {"client_video": str(v), "filename": v.name,
                  "asr_dir": asr_dir.name if asr_dir else None,
                  # 服务端统一落规范 _full 名：事件池/报告只认 *_full
@@ -208,10 +226,20 @@ def _rsync(src: str, dst: str, excludes=(), dry=False):
                    RSYNC_RSH=(f"ssh -F {home}/.ssh/config "
                               f"-o UserKnownHostsFile={home}/.ssh/known_hosts"))
         env["PATH"] = str(Path(rsbin).parent) + os.pathsep + env.get("PATH", "")
+    # 显式管道而非继承句柄（2026-10-15 exe 实测 P0）：msys rsync 派生 msys ssh
+    # 时对继承的标准句柄 dup() 失败（"dup() in/out/err failed" -> exit 12），
+    # bash/真实控制台/源码三场景全挂；显式管道句柄则全场景可用。副作用是
+    # --progress 不再直达控制台——失败时把 stderr 尾部并入报错保排障信息
+    # （windowed exe 里 stderr 本就落在无效句柄，用户原先只能看到裸退出码）。
     r = subprocess.run(cmd, env=env,
+                       stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, encoding="utf-8", errors="replace",
                        creationflags=NO_WINDOW)
     if r.returncode != 0:
-        raise RuntimeError(f"rsync 失败（退出码 {r.returncode}）：{src} -> {dst}")
+        tail = "\n".join((r.stderr or "").strip().splitlines()[-3:])
+        raise RuntimeError(f"rsync 失败（退出码 {r.returncode}）：{src} -> {dst}"
+                           + (f"\n{tail}" if tail else ""))
 
 
 def _rsync_to(alias, remote_path, src, excludes=(), dry=False, raw_src=False):

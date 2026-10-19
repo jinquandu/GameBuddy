@@ -18,4 +18,15 @@ py -3 -m PyInstaller --noconfirm --clean --windowed --name DashijiePet ^
   --exclude-module datasets --exclude-module addict ^
   launch_pet.py
 echo.
-echo Output: dist\DashijiePet\DashijiePet.exe
+rem Distribution hygiene (field test 2026-10-15 P2-2): embed a sanitized
+rem config.yaml derived from config.example.yaml -- no tenant key, so the
+rem server tenant stays "default" until the end user sets it (pet UI).
+rem Never ship the build machine's own config.yaml (tenant data mix-up risk,
+rem plus it carried BOM/mojibake comments). dist config is a build artifact
+rem and is overwritten on every rebuild.
+copy /y config.example.yaml dist\DashijiePet\config.yaml >nul
+rem zip the FOLDER (not its contents): keeps the top-level DashijiePet\
+rem dir inside the archive so extraction does not scatter files.
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\DashijiePet' -DestinationPath 'dist\DashijiePet-core.zip' -Force"
+echo Output: dist\DashijiePet\DashijiePet.exe + dist\DashijiePet-core.zip
+echo (zip embeds sanitized config.yaml; end user sets tenant on first run)
