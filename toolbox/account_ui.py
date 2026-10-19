@@ -7,13 +7,34 @@
 - 409 device_bound：弹确认框，用户显式同意才 replace_device=true 重试
   （重新完成短信验证由服务端语义保证），不自动抢占；
 - 登录成功回填会话，主窗状态行由调用方刷新。
+
+错误路径铁律（REQ-20261019-014 P0）：后台线程不直接碰 Tk（一律
+win.after 回主线程）；except 块里的异常变量出块即被 Python 清除，
+**禁止闭包引用**——先转成安全文本再排回调；失败/超时必须给出明确
+结果并恢复按钮，不无限停留"发送中"；异常文案带脱敏诊断（阶段/
+错误码/HTTP 状态/耗时），手机号、验证码、token 不进任何日志。
 """
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from toolbox import device_identity as di
 from toolbox.account import (AccountClient, AccountError, ServiceNotReady)
+
+
+def _err_text(stage, exc, t0):
+    """异常 → 安全文本（出 except 块前转字符串，杜绝闭包引用已清除的
+    异步异常变量），带脱敏诊断（错误码/HTTP 状态/耗时）。"""
+    dur = int((time.time() - t0) * 1000)
+    if isinstance(exc, AccountError):
+        head = f"{stage}失败：{exc}"
+        code, status = exc.code, exc.status
+    else:
+        head = f"{stage}异常：{exc!r}"
+        code, status = "unexpected", ""
+    return head + f"（{code}" + (f" HTTP{status}" if status else "") \
+        + f" · {dur}ms）"
 
 
 def login_dialog(master, api_url, production_url=None) -> dict:
@@ -59,17 +80,21 @@ def login_dialog(master, api_url, production_url=None) -> dict:
             w.config(state="normal" if on else "disabled")
 
     def check():
-        try:
-            cli.ensure_pc_auth()
-            say("服务就绪，请输入手机号")
-            set_enabled(True)
-            phone_e.focus_set()
-        except ServiceNotReady as e:
-            say(f"账号服务待就绪（{e}），稍后再试", warn=True)
-            set_enabled(False)
-        except AccountError as e:
-            say(f"服务不可达：{e}", warn=True)
-            set_enabled(False)
+        """能力门控（C2S-11）——后台线程执行，主线程改 UI，不冻窗。"""
+        def run():
+            t0 = time.time()
+            try:
+                cli.ensure_pc_auth()
+                _main(lambda: (say("服务就绪，请输入手机号"), set_enabled(True),
+                               phone_e.focus_set()))
+            except AccountError as e:
+                dur = int((time.time() - t0) * 1000)
+                txt = ("账号服务待就绪" if isinstance(e, ServiceNotReady)
+                       else f"服务不可达：{e}")
+                txt += f"（{e.code}" + (f" HTTP{e.status}" if e.status else "") \
+                    + f" · {dur}ms），稍后再试"
+                _main(lambda m=txt: (say(m, warn=True), set_enabled(False)))
+        threading.Thread(target=run, daemon=True).start()
 
     def _bg(fn):
         if busy["on"]:
@@ -85,6 +110,14 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                 win.after(0, lambda: set_enabled(True))
         threading.Thread(target=wrap, daemon=True).start()
 
+    def _main(fn):
+        """后台线程 → 主线程（Tk 只在主线程动）。"""
+        win.after(0, fn)
+
+    def _fail(stage, exc, t0):
+        msg = _err_text(stage, exc, t0)
+        _main(lambda m=msg: say(m, warn=True))
+
     def do_sms():
         phone = phone_var.get().strip()
         if not phone.isdigit() or len(phone) != 11:
@@ -92,16 +125,19 @@ def login_dialog(master, api_url, production_url=None) -> dict:
             return
 
         def run():
-            say("发送验证码…")
+            t0 = time.time()
+            _main(lambda: say("发送验证码…"))
             try:
                 r = cli.request_sms(phone)
                 result["challenge"] = r.get("challenge_id")
-                win.after(0, lambda: say(
-                    "验证码已发送，查收短信" if result["challenge"]
-                    else "服务未返回验证凭据（challenge_id），稍后再试",
-                    warn=not result["challenge"]))
+                ok = bool(result["challenge"])
+                msg = ("验证码已发送，查收短信" if ok
+                       else "服务未返回验证凭据（challenge_id），稍后再试")
+                _main(lambda m=msg, k=ok: say(m, warn=not k))
             except AccountError as e:
-                win.after(0, lambda: say(f"发送失败：{e}", warn=True))
+                _fail("发送", e, t0)
+            except Exception as ex:            # noqa: BLE001 未知异常也要落地
+                _fail("发送", ex, t0)
         _bg(run)
 
     def do_login():
@@ -112,25 +148,33 @@ def login_dialog(master, api_url, production_url=None) -> dict:
             return
 
         def run(replace=False):
-            say("登录中…" + ("（换机确认）" if replace else ""))
+            t0 = time.time()
+            _main(lambda m=f"登录中…{('（换机确认）') if replace else ''}":
+                  say(m))
             try:
                 sess = cli.login(result["challenge"], code, phone=phone,
                                  replace_device=replace)
                 result["sess"] = sess
-                win.after(0, win.destroy)
+                _main(win.destroy)
             except AccountError as e:
                 if e.code == "device_bound":
                     bound = (e.data.get("bound_device") or {})
                     msg = ("该账号已绑定其他电脑（%s）。\n换绑会使旧电脑登录失效，"
                            "确定换绑到本机吗？" % bound.get("digest", "未知设备"))
-                    if messagebox.askyesno("换机确认", msg, parent=win):
-                        run(replace=True)
-                    else:
-                        win.after(0, lambda: say("已取消换绑"))
+                    # 确认框回主线程；同意后再回后台线程重试（replace=True）
+                    def ask():
+                        if messagebox.askyesno("换机确认", msg, parent=win):
+                            _bg(lambda: run(True))
+                        else:
+                            say("已取消换绑")
+                    _main(ask)
                     return
-                win.after(0, lambda: say(f"登录失败：{e}", warn=True))
+                _fail("登录", e, t0)
+            except Exception as ex:            # noqa: BLE001
+                _fail("登录", ex, t0)
         _bg(lambda: run(False))
 
+    set_enabled(False)                 # 能力确认前输入一律禁用（check 放行）
     sms_btn.config(command=do_sms)
     login_btn.config(command=do_login)
     win.protocol("WM_DELETE_WINDOW", win.destroy)
