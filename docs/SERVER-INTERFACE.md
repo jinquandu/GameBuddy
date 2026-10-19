@@ -88,7 +88,7 @@ data/remixes/（手动上传发布）
 | --- | --- | --- |
 | `ssh_alias` | `ecs` | `~/.ssh/config` 里的主机别名 |
 | `remote_root` | `/opt/dashijie-eval-data` | 服务端稳定数据根（部署包外，更新不删） |
-| `tenant` | `default` | 租户名（多租户方案A） |
+| `tenant` | 未配置=自动分配 | 租户名（多租户方案A）。用户 config 未配置时，端侧首次 push/pull 按装机时间生成 `auto-YYYYMMDD-HHMMSS` 并写回 config.yaml（2026-10-19 起；此前缺省字面 `default`，多客户会串号进同一租户） |
 | `container` | `dashijie-eval` | 服务端容器名 |
 | `site_url` | `http://8.153.157.239/eval/` | 打标站地址（人用，非机器接口；域名失效后统一改公网 IP，IP 变更时同步改此项） |
 | `keep_sessions` | `3` | prune 每租户保留最近 N 个会话 |

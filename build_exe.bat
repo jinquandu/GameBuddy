@@ -29,4 +29,5 @@ rem zip the FOLDER (not its contents): keeps the top-level DashijiePet\
 rem dir inside the archive so extraction does not scatter files.
 powershell -NoProfile -Command "Compress-Archive -Path 'dist\DashijiePet' -DestinationPath 'dist\DashijiePet-core.zip' -Force"
 echo Output: dist\DashijiePet\DashijiePet.exe + dist\DashijiePet-core.zip
-echo (zip embeds sanitized config.yaml; end user sets tenant on first run)
+echo zip embeds sanitized config.yaml with no tenant - first push/pull
+echo auto-assigns an install-time tenant auto-YYYYMMDD-HHMMSS

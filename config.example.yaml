@@ -13,6 +13,8 @@ features:
 
 # ---- 应用端 <-> 服务端（ECS）搬运，接口契约见 docs/SERVER-INTERFACE.md ----
 server:
+  # tenant: my-tenant   # 租户名（字母数字-_，≤32 字）。不配置则首次 push/pull
+                        # 按装机时间自动生成 auto-YYYYMMDD-HHMMSS 并写回本文件
   ssh_alias: ecs            # ~/.ssh/config 里的别名（push/pull 走 rsync over ssh）
   remote_root: /opt/dashijie-eval-data   # 服务端稳定数据根（部署包外，更新不删）
   container: dashijie-eval  # 服务端跑 toolbox 的容器（push 触发 import/eval 用）

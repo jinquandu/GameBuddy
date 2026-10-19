@@ -102,6 +102,15 @@ def load_config():
     return _merge(DEFAULTS, _user_config())
 
 
+def user_server_cfg():
+    """用户 config.yaml 的 server 节原值（未与 DEFAULTS 合并；无文件/无节={}）。
+
+    用于区分「用户显式配置」与「代码默认值」：合并结果恒含 DEFAULTS 的
+    server.tenant，判断租户是否被用户配置过必须看这里（transfer 自动
+    分配租户的依据）。"""
+    return (_user_config().get("server") or {})
+
+
 def _resolve_data_dir(cfg):
     """数据根解析：TOOLBOX_DATA_DIR 环境变量 > paths.data_dir > 默认 data。"""
     env = os.environ.get("TOOLBOX_DATA_DIR")

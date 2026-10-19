@@ -145,14 +145,19 @@ def discover_session(session):
 def _ssh(alias, remote_cmd, check=True):
     """控制通道（mkdir/import 触发）：Windows 固定用原生 OpenSSH（读
     ~/.ssh/config 无障碍）；MSYS ssh 仅供 rsync 进程内使用（见 _rsync 注释），
-    PATH 里排在前面时不能让它劫持这里的 "ssh"。"""
+    PATH 里排在前面时不能让它劫持这里的 "ssh"。输出显式按 UTF-8 解——
+    服务端恒 UTF-8，text=True 裸跑会随 locale 走 GBK，中文输出轻则乱码、
+    重则 reader 线程 UnicodeDecodeError 后 stdout=None 炸 _trigger
+    （2026-10-19 exe 实测：import-session 输出含场次中文名即崩）。"""
     bin_ = "ssh"
     if os.name == "nt":
         native = Path(r"C:\Windows\System32\OpenSSH\ssh.exe")
         if native.exists():
             bin_ = str(native)
     return subprocess.run([bin_, alias, remote_cmd],
-                          check=check, text=True, capture_output=True,
+                          check=check, text=True,
+                          encoding="utf-8", errors="replace",
+                          capture_output=True,
                           creationflags=NO_WINDOW)
 
 
@@ -273,9 +278,67 @@ EVAL_EXCLUDES = {
 }
 
 
+def _auto_tenant_id():
+    """装机时间坐标租户 ID：auto-YYYYMMDD-HHMMSS（_tenant_root 合法字符集内）。"""
+    return "auto-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _persist_tenant(tenant):
+    """把 tenant 写入 ROOT/config.yaml，保留其余内容与注释（BOM 顺手归一）。
+
+    三种落点：已有 tenant 行 → 原位换值；有 server: 节 → 插到节首；
+    都没有（甚至无 config.yaml）→ 追加最小 server 节。"""
+    from toolbox.config import ROOT
+    path = ROOT / "config.yaml"
+    quoted = f'"{tenant}"'      # 引号防 YAML 把 0 开头/纯数字串当数值或八进制
+    if path.exists():
+        text = path.read_text(encoding="utf-8-sig")
+        # 行内空白用 [ \t]：\s 会吞换行，把替换值挤到下一行
+        if re.search(r"^[ \t]*tenant[ \t]*:", text, flags=re.M):
+            text = re.sub(r"^([ \t]*tenant[ \t]*:)[ \t]*.*$", r"\g<1> " + quoted,
+                          text, count=1, flags=re.M)
+        elif re.search(r"^server[ \t]*:", text, flags=re.M):
+            if not text.endswith("\n"):     # server: 为末行无换行时插不进
+                text += "\n"
+            text = re.sub(r"^(server[ \t]*:)[ \t]*\n",
+                          "\\1\n" + f"  tenant: {quoted}\n",
+                          text, count=1, flags=re.M)
+        else:
+            text = text.rstrip("\n") + f"\n\nserver:\n  tenant: {quoted}\n"
+        path.write_text(text, encoding="utf-8")
+    else:
+        path.write_text(f"server:\n  tenant: {quoted}\n", encoding="utf-8")
+
+
+def _ensure_tenant(cfg):
+    """tenant 未配置时按当前时间生成本机租户 ID 并写回 config.yaml。
+
+    分发包 config 不含 tenant（2026-10-15 实测 P2-2：打包机租户外泄会
+    串号），若缺省都落到字面 "default"，不同客户的数据会混进同一租户——
+    改为装机首次使用时刻生成 auto-* 并持久化，本机后续 push/pull 复用
+    同一租户。用户显式配置（config.yaml / CLI --tenant）优先，不受影响。
+    判断必须看原始用户配置（config.user_server_cfg）：合并结果恒含
+    DEFAULTS 的 "default"，分不出「没配」和「配了 default」。"""
+    from toolbox.config import user_server_cfg
+    user_t = user_server_cfg().get("tenant")
+    if user_t is not None:
+        return user_t
+    tenant = _auto_tenant_id()
+    cfg["tenant"] = tenant          # 本进程内立即生效（cfg 是 load_config 的节点）
+    try:
+        _persist_tenant(tenant)
+        print(f"未配置租户：已按本机时间生成 tenant={tenant} 并写入 config.yaml"
+              "（归入指定租户请改 server.tenant 后重推）")
+    except OSError as e:
+        print(f"警告：租户 {tenant} 写回 config.yaml 失败（{e}），"
+              "下次运行将生成新租户，请尽快显式配置 server.tenant")
+    return tenant
+
+
 def _tenant_root(cfg, tenant=None):
-    """多租户方案A：数据按 /opt/dashijie-eval-data/tenants/<租户>/ 分前缀。"""
-    raw = tenant if tenant is not None else cfg.get("tenant", "default")
+    """多租户方案A：数据按 /opt/dashijie-eval-data/tenants/<租户>/ 分前缀。
+    tenant 未配置时自动分配（见 _ensure_tenant）；CLI --tenant 显式覆盖。"""
+    raw = tenant if tenant is not None else _ensure_tenant(cfg)
     t = str(raw).strip()   # YAML 会把 007 解析成 int，统一转字符串
     if not t or not re.match(r"^[A-Za-z0-9_-]{1,32}$", t):
         raise ValueError(f"租户名不合法: {t!r}（仅限字母数字-_，≤32 字）")
@@ -389,7 +452,7 @@ def _trigger(alias, session, tenant_root, do_eval=False, dry=False):
         return
     print(f"触发服务端: {remote_cmd}")
     r = _ssh(alias, remote_cmd, check=False)
-    if r.stdout.strip():
+    if r.stdout and r.stdout.strip():   # None 防卫：读端异常时不在此二次崩
         print(r.stdout.strip())
     if r.returncode != 0:
         raise RuntimeError(f"服务端 import/eval 失败:\n{r.stderr.strip()[:800]}")

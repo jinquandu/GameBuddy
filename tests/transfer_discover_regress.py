@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
-"""discover_session / _find_events_rpt 契约回归（2026-10-15 exe 实测 P1-2/P2-1）。
+"""discover_session / _find_events_rpt / 租户自动分配 契约回归
+（2026-10-15 exe 实测 P1-2/P2-1 + 2026-10-19 auto-tenant）。
 
 - 空事件流报告 = 0 事件结论：不算 missing（曾把 0 事件的 P2/P3 登记成
   「无事件流（先跑 toolbox detect）」→ manifest 误标 incomplete，打标站长
   期误导）；
 - legacy 裸名目录仍按 src 匹配；
-- missing 文案用全名（曾 [:30] 把长中文名连扩展名截掉写进 manifest.json）。
+- missing 文案用全名（曾 [:30] 把长中文名连扩展名截掉写进 manifest.json）；
+- server.tenant 未配置 → auto-YYYYMMDD-HHMMSS 生成 + config.yaml 持久化 +
+  二次复用；显式配置优先；占位空值原位替换；
+- _ssh 显式 UTF-8 解码（冻结 exe locale=GBK 曾炸 reader 线程致 stdout=None）。
 
-不依赖网络/OCR：REPORTS/ASR 指到临时目录。
+不依赖网络/OCR：REPORTS/ASR/ROOT 指到临时目录。
 跑法：py -3 tests/transfer_discover_regress.py
 """
 import json
+import re
+import subprocess as sp
 import sys
 import tempfile
 from pathlib import Path
@@ -96,12 +102,63 @@ def main():
             miss2 = "\n".join(disc2["missing"])
             assert f"{p4.name}：无事件流（先跑 toolbox detect）" in miss2, \
                 disc2["missing"]
+
+            # ---- auto-tenant：未配置 → 生成/持久化/复用 ----
+            import toolbox.config as cfgmod
+            real_root = cfgmod.ROOT
+            troot = t / "fake_root"
+            troot.mkdir()
+            cfgmod.ROOT = troot          # _user_config/_persist_tenant 均按调用时 ROOT 取
+            try:
+                cfg = {"remote_root": "/opt/dashijie-eval-data"}
+                got = transfer._ensure_tenant(cfg)
+                assert re.fullmatch(r"auto-\d{8}-\d{6}", got), got
+                assert cfg["tenant"] == got              # 本进程内即时生效
+                written = (troot / "config.yaml").read_text(encoding="utf-8")
+                assert f'tenant: "{got}"' in written, written
+                # 二次（等价新进程重新读盘）→ 复用持久化值，不再生成
+                assert transfer._ensure_tenant({"remote_root": "/x"}) == got
+                assert transfer._tenant_root(
+                    {"remote_root": "/opt/x"}) == f"/opt/x/tenants/{got}"
+                # 用户显式配置优先（数值租户 007 也能原样返回）
+                (troot / "config.yaml").write_text(
+                    'server:\n  tenant: "007"\n', encoding="utf-8")
+                assert transfer._ensure_tenant({}) == "007"
+                # 占位空值 → 原位替换，不产生第二行 tenant
+                (troot / "config.yaml").write_text(
+                    "server:\n  tenant:\n  ssh_alias: ecs\n", encoding="utf-8")
+                got3 = transfer._ensure_tenant({})
+                assert re.fullmatch(r"auto-\d{8}-\d{6}", got3), got3
+                text3 = (troot / "config.yaml").read_text(encoding="utf-8")
+                assert f'tenant: "{got3}"' in text3, text3
+                assert len(re.findall(r"^\s*tenant\s*:", text3, re.M)) == 1
+                assert "ssh_alias: ecs" in text3       # 其余行不动
+            finally:
+                cfgmod.ROOT = real_root
+
+            # ---- _ssh 显式 UTF-8：不随 locale 解码 ----
+            real_run = sp.run
+            cap = {}
+
+            def fake_run(cmd, **kw):
+                cap.update(kw)
+                cap["cmd"] = cmd
+                return sp.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+            sp.run = fake_run
+            try:
+                transfer._ssh("dummy", "echo hi", check=False)
+            finally:
+                sp.run = real_run
+            assert cap.get("encoding") == "utf-8", cap
+            assert cap.get("errors") == "replace", cap
         finally:
             transfer.REPORTS, transfer.DATA = real_reports, real_data
             asr_mod.ASR = real_asr
 
-    print("discover_session/_find_events_rpt 回归 ✓（空报告=结论不进 missing / "
-          "legacy src 匹配 / missing 全名）")
+    print("discover_session/_find_events_rpt/auto-tenant/_ssh 回归 ✓（空报告="
+          "结论不进 missing / legacy src 匹配 / missing 全名 / auto 租户生成-"
+          "持久化-复用 / _ssh 恒 UTF-8）")
 
 
 if __name__ == "__main__":

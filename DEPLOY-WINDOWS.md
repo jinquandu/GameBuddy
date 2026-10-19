@@ -62,9 +62,11 @@ B 站下载还需 `bilibili_cookies.txt`（Netscape 格式，从浏览器导出�
 **整个文件夹**拷给目标机，双击 `DashijiePet.exe` 即出桌宠小窗。
 
 - 分发用 `dist\DashijiePet-core.zip`（bat 收尾自动刷新）：内嵌从
-  `config.example.yaml` 生成的净化 `config.yaml`——**不含 tenant**（未设置
-  走 default，首次用桌宠界面填租户）。不要把打包机自己的 config.yaml
-  直接分发（2026-10-15 实测曾带着 `tenant: "007"` 出包，有数据串号风险）；
+  `config.example.yaml` 生成的净化 `config.yaml`——**不含 tenant**（首次
+  push/pull 按装机时间自动生成 `auto-YYYYMMDD-HHMMSS` 并写回，各客户数据
+  天然分租户；要归入指定租户再改 `server.tenant`）。不要把打包机自己的
+  config.yaml 直接分发（2026-10-15 实测曾带着 `tenant: "007"` 出包，有数据
+  串号风险）；
 
 - 布局便携：video/、data/、config.yaml 都锚定 exe 所在目录；
 - 内容 = 核心版（OCR 击倒/拾取/push 全可用），ASR 语音线未打包，
