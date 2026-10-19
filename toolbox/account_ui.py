@@ -43,13 +43,12 @@ def login_dialog(master, api_url, production_url=None) -> dict:
     st = tk.Label(f, text="检查服务能力…", bg="#F6F5F2", fg="#8A8A85",
                   font=("Microsoft YaHei UI", 9), wraplength=230, justify="left")
     st.pack(fill="x", pady=(8, 0))
-    dev = di.device_id()
-    ttk.Label(f, text=f"本机设备 {dev[:12]}…（Ed25519+DPAPI，换机需重新验证）",
+    ttk.Label(f, text=f"本机设备 {di.device_code()}（换机需重新验证）",
               foreground="#B0B0AA",
               font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(6, 0))
 
     cli = AccountClient(api_url, production_url)
-    result = {"sess": {}}
+    result = {"sess": {}, "challenge": None}
     busy = {"on": False}
 
     def say(text, warn=False):
@@ -95,8 +94,12 @@ def login_dialog(master, api_url, production_url=None) -> dict:
         def run():
             say("发送验证码…")
             try:
-                cli.request_sms(phone)
-                win.after(0, lambda: say("验证码已发送，查收短信"))
+                r = cli.request_sms(phone)
+                result["challenge"] = r.get("challenge_id")
+                win.after(0, lambda: say(
+                    "验证码已发送，查收短信" if result["challenge"]
+                    else "服务未返回验证凭据（challenge_id），稍后再试",
+                    warn=not result["challenge"]))
             except AccountError as e:
                 win.after(0, lambda: say(f"发送失败：{e}", warn=True))
         _bg(run)
@@ -104,11 +107,15 @@ def login_dialog(master, api_url, production_url=None) -> dict:
     def do_login():
         phone = phone_var.get().strip()
         code = code_var.get().strip()
+        if not result.get("challenge"):
+            say("先点「获取验证码」拿到短信凭据再登录", warn=True)
+            return
 
         def run(replace=False):
             say("登录中…" + ("（换机确认）" if replace else ""))
             try:
-                sess = cli.login(phone, code, replace_device=replace)
+                sess = cli.login(result["challenge"], code, phone=phone,
+                                 replace_device=replace)
                 result["sess"] = sess
                 win.after(0, win.destroy)
             except AccountError as e:

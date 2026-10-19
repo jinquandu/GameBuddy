@@ -22,7 +22,7 @@ from pathlib import Path
 from toolbox.config import DATA
 
 DEVICE_DIR = DATA / ".device"
-KEY_FILE = DEVICE_DIR / "key.bin"
+KEY_FILE = DEVICE_DIR / "pc-device-v1.dpapi"
 SESSION_FILE = DEVICE_DIR / "session.json"      # DPAPI 包裹的账号会话
 
 SPEC = "DSJ-PC-1"
@@ -134,7 +134,14 @@ def public_key_b64() -> str:
 
 
 def device_id() -> str:
-    return "dv-" + hashlib.sha256(public_key_bytes()).hexdigest()[:32]
+    """sha256(原始公钥) hex 前 32 位（契约 §4A 细则，无前缀）。"""
+    return hashlib.sha256(public_key_bytes()).hexdigest()[:32]
+
+
+def device_code() -> str:
+    """展示码（UI 用）：DSJ-XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX。"""
+    d = device_id()
+    return "DSJ-" + "-".join(d[i:i + 8].upper() for i in range(0, 32, 8))
 
 
 # ---------------------------------------------------------------- 签名器
@@ -143,46 +150,51 @@ def _b64url(sig: bytes) -> str:
     return base64.urlsafe_b64encode(sig).decode().rstrip("=")
 
 
-def canonical_payload(method: str, raw_path: str, raw_query: str,
-                      body: bytes, bearer: str, ts: int, nonce: str) -> bytes:
-    """契约 §4A 规范化串：9 行 LF 连接。body/bearer 均取 sha256 hex。"""
+def canonical_payload(method: str, raw_path_with_query: str,
+                      body: bytes, bearer: str, ts, nonce: str) -> bytes:
+    """契约 §4A 规范化串（对齐原始规范）：8 行 LF 连接，path 含 query 一体，
+    body/bearer 均取 sha256 hex。"""
     body_hex = hashlib.sha256(body or b"").hexdigest()
     bearer_hex = hashlib.sha256((bearer or "").encode("utf-8")).hexdigest()
-    return "\n".join([SPEC, method.upper(), raw_path, raw_query or "",
+    return "\n".join([SPEC, method.upper(), raw_path_with_query,
                       body_hex, bearer_hex, device_id(), str(ts),
                       nonce]).encode("utf-8")
 
 
 def sign_request(method: str, url_path: str, body: bytes = b"",
                  bearer: str = "") -> dict:
-    """对一次请求生成 DSJ-PC-1 签名头。url_path 可含 query（自动拆分，
-    双方都以「发到线上的原样 path/query」为准——本端构造后不再改动）。"""
-    if "?" in url_path:
-        raw_path, raw_query = url_path.split("?", 1)
-    else:
-        raw_path, raw_query = url_path, ""
+    """对一次请求生成 DSJ-PC-1 签名头（五头，公钥随头——服务端免登记验签）。
+    url_path 为线上原样 path（含 query 一体）。"""
     ts = int(time.time())
-    nonce = secrets.token_urlsafe(16)
-    payload = canonical_payload(method, raw_path, raw_query, body or b"",
+    nonce = secrets.token_hex(16)
+    payload = canonical_payload(method, url_path, body or b"",
                                 bearer or "", ts, nonce)
     sig = device_key().sign(payload)
-    return {"X-DSJ-Device": device_id(),
-            "X-DSJ-Timestamp": str(ts),
-            "X-DSJ-Nonce": nonce,
-            "X-DSJ-Signature": _b64url(sig)}
+    return {"X-DSJ-Device-Id": device_id(),
+            "X-DSJ-Device-Key": public_key_b64(),
+            "X-DSJ-Device-Time": str(ts),
+            "X-DSJ-Device-Nonce": nonce,
+            "X-DSJ-Device-Signature": _b64url(sig)}
 
 
-def verify_request(headers: dict, method: str, raw_path: str, raw_query: str,
+def verify_request(headers: dict, method: str, raw_path_with_query: str,
                    body: bytes, bearer: str, pubkey: bytes) -> bool:
     """验签（测试/服务端参考实现共用语义；PC 生产路径不本地验自己的签名）。"""
-    ts = headers.get("X-DSJ-Timestamp", "")
-    nonce = headers.get("X-DSJ-Nonce", "")
-    sig_b64 = headers.get("X-DSJ-Signature", "")
-    if not (ts and nonce and sig_b64):
+    hl = {k.lower(): v for k, v in headers.items()}
+    ts = hl.get("x-dsj-device-time", "")
+    nonce = hl.get("x-dsj-device-nonce", "")
+    dev = hl.get("x-dsj-device-id", "")
+    sig_b64 = hl.get("x-dsj-device-signature", "")
+    if not (ts and nonce and dev and sig_b64):
         return False
     try:
-        payload = canonical_payload(method, raw_path, raw_query, body, bearer,
-                                    int(ts), nonce)
+        # canonical 的 device 行用请求头里的 dev（验对方/本机任一签名者，
+        # 不取本机单例 device_id()——交叉验签实测踩过）
+        body_hex = hashlib.sha256(body or b"").hexdigest()
+        bearer_hex = hashlib.sha256((bearer or "").encode("utf-8")).hexdigest()
+        payload = "\n".join([SPEC, method.upper(), raw_path_with_query,
+                             body_hex, bearer_hex, dev, str(ts),
+                             nonce]).encode("utf-8")
         sig = base64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4))
         from cryptography.hazmat.primitives.asymmetric.ed25519 import \
             Ed25519PublicKey

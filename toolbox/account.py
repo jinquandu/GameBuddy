@@ -102,19 +102,22 @@ class AccountClient:
         self.ensure_pc_auth()                 # 发短信前先检查设备契约（REQ-002 B1）
         return self._request(self.api, "POST", "/sms", {"phone": phone})
 
-    def login(self, phone, sms_code, replace_device=False):
-        """C2S-10：短信码 + 设备签名登录；成功落 DPAPI 会话。"""
+    def login(self, challenge_id, code, phone="", replace_device=False):
+        """C2S-10（challenge 两步）：sms 先取 challenge_id，凭码+设备签名登录；
+        成功落 DPAPI 会话。公钥经签名头携带（X-DSJ-Device-Key），body 不带。"""
         self.ensure_pc_auth()
         r = self._request(self.api, "POST", "/login", {
-            "client": "pc", "phone": phone, "sms_code": sms_code,
+            "challenge_id": challenge_id, "code": code, "client": "pc",
             "device_id": di.device_id(),
-            "public_key": di.public_key_b64(),
             "replace_device": replace_device})
-        sess = {"user_id": r.get("user_id"), "phone": phone,
-                "bearer": r["bearer"],
-                "expires_at": r.get("expires_at"),
-                "expires_at_ts": r.get("expires_at_ts",
-                                       time.time() + 12 * 3600),
+        user = r.get("user") or {}
+        uid = user.get("user_id") or user.get("id") or user.get("phone") or "?"
+        ttl = r.get("expires_in") or 12 * 3600
+        sess = {"user_id": uid, "phone": phone or user.get("phone", ""),
+                "bearer": r["access_token"],
+                "expires_at": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(time.time() + ttl)),
+                "expires_at_ts": time.time() + ttl,
                 "logged_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         di.save_session(sess)
         return sess
