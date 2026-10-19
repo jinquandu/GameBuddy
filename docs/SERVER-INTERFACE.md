@@ -534,6 +534,23 @@ POST /api/account/v1/login    {"challenge_id":"…","code":"…","client":"pc",
 - 校验的是**原请求**而非核验接口自身路径；代理改写 path 必须还原已
   验证目标，不信任公网侧 `X-Original-*` 头。
 
+#### INT-1 原请求证明字段细则（S1 配套实现）
+
+复用生产侧现有 POST /internal/v1/account/authorize 和独立 Authorization: Bearer 内部服务凭证。
+
+请求 JSON 为 {"request":{"method":"GET","path":"/api/production/v1/jobs/job_x","query":"","body_sha256":"<64小写hex>","bearer":"<PC会话原token>","device":"<32hex>","public_key":"<43字符base64url>","timestamp":"<Unix秒字符串>","nonce":"<32hex>","signature":"<86字符base64url>"}}。
+
+路径和查询来自服务器可信 raw URI，不采信公网 X-Original-*；query 不带问号，签名时拼回 path + ('?' + query if query else '')。device/public_key/timestamp/nonce/signature 对应冻结版五个 X-DSJ-Device-* 头，不能混用旧四头。原 bearer 仅在互信 HTTPS 请求体传递，用其 SHA-256 查询会话和构造签名串，不写日志/URL；独立服务凭证不能当 PC 会话。
+
+body_sha256 必须由 cut_server 根据实际原请求正文计算；账号侧把该摘要直接放入 8 行串，不能再对摘要字符串哈希。本单阶段入口不授予未读取分块的接收许可，未实现两阶段接口时不得绕过实际正文哈希。
+
+响应 {"principal":{"user_id":"dsj_...","device_id":"...","expires_at":整数Unix秒,"entitlements":{"membership_active":布尔,"membership_expires_at":整数或null},"tenant":"usr_..."}}。账号服务通过现有 ProductionIdentity /v1/internal/production/accounts 取得映射，不信任 PC 自报 tenant。无会员仍可验证身份，付费准入由业务层决定；本次不擅自决定 REQ-009 额度或月份算法。
+
+错误同时保留旧 detail 字符串和 error:{code,message}，采用冻结码 invalid_token/device_revoked/auth_replay/forbidden/dependency_unavailable；未确认换机用 device_bound 并附现设备摘要。内部服务认证必须通过后才能调用映射。会话/绑定在验签后和映射返回后重新检查，成功授权不缓存。
+
+生产侧需随账号服务配套合入 peer/pc_auth.py 差异：五头、原始 URI、互信 HTTPS、principal 形状检查、依赖故障拒绝。文档与代码补丁一起交付；权威端先将本细则收编 docs/SERVER-INTERFACE.md 并同步服务端副本，再发布，不能把本附件当第二份权威。
+
+
 ### INT-2 生产任务提交（账号服务 → cut_server）
 
 - `POST /internal/v1/production/jobs`：账号侧专用凭证；入参 = 业务
