@@ -82,8 +82,8 @@ data/remixes/（手动上传发布）
 | rsync over ssh | 数据搬运（内部机器 push/pull） | GNU rsync（须支持 `--secluded-args`/`--protect-args`，远端路径含中文/括号）；参数 `-a --partial --modify-window=1`；Windows 平台配方见 DEPLOY-WINDOWS.md。**仅限内部运维机器** |
 | ssh 控制通道 | mkdir / 触发容器命令（rsync 通道配套） | Windows 固定用原生 OpenSSH（`C:\Windows\System32\OpenSSH\ssh.exe`）；HTTPS 通道不使用 |
 | docker exec | 容器内跑 toolbox 命令 | `docker exec -e TOOLBOX_DATA_DIR=<租户根>/data <container> python3 -m toolbox <cmd>`；HTTPS 通道的 complete 在服务端侧同样以该形态触发 import/eval |
-| 账号服务 HTTPS（1.4.0 草案） | 统一账号：登录/设备鉴权/生产申请 | `https://95188.pw/api/account/v1`（nginx → 旧机账号服务，暂驻；见 C2S-10~12） |
-| 内部互信 HTTPS（1.4.0 草案） | cut_server ↔ 账号服务内部接口 | TLS + 专用最小权限服务凭证 + 固定目标地址（禁止公网直连/loopback 明文假内网；容器经 bridge 访问宿主服务用实际网关地址）；见 INT-1~3 |
+| 账号服务 HTTPS（1.4.0，已冻结未上线） | 统一账号：登录/设备鉴权/生产申请 | `https://95188.pw/api/account/v1`（nginx → 旧机账号服务，暂驻；见 C2S-10~12） |
+| 内部互信 HTTPS（1.4.0，已冻结未上线） | cut_server ↔ 账号服务内部接口 | TLS + 专用最小权限服务凭证 + 固定目标地址（禁止公网直连/loopback 明文假内网；容器经 bridge 访问宿主服务用实际网关地址）；见 INT-1~3 |
 
 通道选择：`config.yaml server.upload_url` 非空 → HTTPS 通道（`upload_token` 必须同时配置，否则报错，**不静默回退 SSH**）；为空 → rsync 通道。
 
@@ -154,18 +154,18 @@ data/remixes/（手动上传发布）
 | SRV-2 | eval（评估链） | 服务端容器内 | CLI | C2S-5 触发 / 打标站 | 已实施 |
 | SRV-3 | sessions list/prune | 服务端 | CLI | 运维手动 | 已实施 |
 | SRV-4 | upload-token 运维（发放/吊销/列表） | 服务端 | CLI | `deploy/eval/upload_token.py` | 已实施（1.3.0） |
-| C2S-10 | PC 设备鉴权登录 | 端→账号服务 | HTTPS | `POST /api/account/v1/login`（`client=pc`+设备签名；换机 `replace_device`） | **草案（拟 1.4.0）** |
-| C2S-11 | 账号能力声明 | 端→账号服务 | HTTPS | `GET /api/account/v1/health`（声明 `pc_device_auth_contract`） | **草案（拟 1.4.0）** |
-| C2S-12 | 生产申请 | 端→账号服务 | HTTPS | `POST /api/account/v1/production-jobs` | **草案（拟 1.4.0）** |
-| C2S-13 | 生产任务查询 | 端→服务端 | HTTPS | `GET /api/production/v1/jobs/<job_id>` | **草案（拟 1.4.0）** |
-| C2S-14 | 受控产物读取 | 端→服务端 | HTTPS | `GET /api/production/v1/jobs/<job_id>/artifacts/<file_id>` | **草案（拟 1.4.0）** |
-| INT-1 | 原请求身份核验 | cut_server→账号服务 | 内部互信 HTTPS | `POST /internal/v1/account/authorize` | **草案（拟 1.4.0）** |
-| INT-2 | 生产任务提交/查重 | 账号服务→cut_server | 内部互信 HTTPS | `POST /internal/v1/production/jobs` | **草案（拟 1.4.0）** |
-| INT-3 | 上传回执查询 | 账号服务→cut_server | 内部互信 HTTPS | `GET /internal/v1/production/uploads/<upload_id>/receipt` | **草案（拟 1.4.0）** |
+| C2S-10 | PC 设备鉴权登录 | 端→账号服务 | HTTPS | `POST /api/account/v1/login`（`client=pc`+设备签名；换机 `replace_device`） | **已冻结（1.4.0，未上线）** |
+| C2S-11 | 账号能力声明 | 端→账号服务 | HTTPS | `GET /api/account/v1/health`（声明 `pc_device_auth_contract`） | **已冻结（1.4.0，未上线）** |
+| C2S-12 | 生产申请 | 端→账号服务 | HTTPS | `POST /api/account/v1/production-jobs` | **已冻结（1.4.0，未上线）** |
+| C2S-13 | 生产任务查询 | 端→服务端 | HTTPS | `GET /api/production/v1/jobs/<job_id>` | **已冻结（1.4.0，未上线）** |
+| C2S-14 | 受控产物读取 | 端→服务端 | HTTPS | `GET /api/production/v1/jobs/<job_id>/artifacts/<file_id>` | **已冻结（1.4.0，未上线）** |
+| INT-1 | 原请求身份核验 | cut_server→账号服务 | 内部互信 HTTPS | `POST /internal/v1/account/authorize` | **已冻结（1.4.0，未上线）** |
+| INT-2 | 生产任务提交/查重 | 账号服务→cut_server | 内部互信 HTTPS | `POST /internal/v1/production/jobs` | **已冻结（1.4.0，未上线）** |
+| INT-3 | 上传回执查询 | 账号服务→cut_server | 内部互信 HTTPS | `GET /internal/v1/production/uploads/<upload_id>/receipt` | **已冻结（1.4.0，未上线）** |
 
-> **INT 编号族**为本草案新增（内部互信接口：服务进程间调用，非 PC/端侧
-> 发起），与 C2S/S2C/SRV 族并列、同样只增不改。草案行不代表已实现或可
-> 调用；冻结实施后 CONTRACT_VERSION → 1.4.0。
+> **INT 编号族**为 1.4.0 新增（内部互信接口：服务进程间调用，非 PC/端侧
+> 发起），与 C2S/S2C/SRV 族并列、同样只增不改。「已冻结（未上线）」表示
+> 接口定义已定、尚未实施——实施上线时随发版把 CONTRACT_VERSION → 1.4.0。
 
 服务端另有 `highlight / remix / report / score / pscore` 等纯服务端命令
 （端侧包不携带，调用提示「命令不可用」），不在跨端接口范围内，混剪产物
@@ -381,13 +381,18 @@ python3 -m toolbox sessions [list|prune] [--keep N] [--tenant <t>]
 
 ---
 
-## 4A. 统一账号与生产准入接口（1.4.0 草案，REQ-20261019-003）
+## 4A. 统一账号与生产准入接口（1.4.0，REQ-20261019-003）
 
-> **状态：草案**。依据 REQ-20261019-003 §拟议接口边界整理，供三方评审；
-> 冻结前不代表任何一侧已实现/可调用，`CONTRACT_VERSION` 仍为 1.3.0。
-> 冻结并实施时：本节状态改「已实施」，`CONTRACT_VERSION` → 1.4.0。
+> **状态：已冻结（2026-10-19）**。依据 REQ-20261019-003 §拟议接口边界整理，
+> 经端侧评审（三条意见已落实，见 §8 changelog 1.4.0 冻结行）后按用户指示
+> 冻结接口定义：**接口形状、编号、错误语义自此不得再改**，后续任何变更
+> 须走 §0 版本纪律（新接口顺延编号，破坏性变更升主版本）。
+> **冻结 ≠ 已实施**：本节接口尚未上线，线上 `CONTRACT_VERSION` 仍为
+> 1.3.0（代码常量随双端实施发版升至 1.4.0，届时本节各接口状态改
+> 「已实施」）。账号侧（用户侧）实施时以本节为开发依据，如有异议走
+> 版本变更流程而非直接改约。
 > 版本合并说明：旧工作副本曾有一条未发布的 1.4.0（账号/投稿扩展），
-> 本草案为它与线上 1.3.0 的逐项合并起点，不是按数值覆盖。
+> 本节为它与线上 1.3.0 的逐项合并起点，不是按数值覆盖。
 
 ### 总则（适用本节全部接口）
 
@@ -412,6 +417,8 @@ python3 -m toolbox sessions [list|prune] [--keep N] [--tenant <t>]
    forbidden`；`404 not_found`（资源不存在或不属当前账号，同形不泄露）；
    `409 conflict`（换机未确认/幂等内容冲突）；`413 too_large`；
    `429 rate_limited`；`503 dependency_unavailable`。
+   本清单为**公共子集**；各接口专属错误码以各节定义为准（如 C2S-10 的
+   `409 device_bound`），端侧不得对未列举 code 做崩溃处理。
 
 ### C2S-10 PC 设备鉴权登录（账号服务）
 
@@ -474,6 +481,11 @@ python3 -m toolbox sessions [list|prune] [--keep N] [--tenant <t>]
 - `GET /internal/v1/production/uploads/<upload_id>/receipt`：回执存在且
   complete（state=imported）时返回归属与校验摘要；供 C2S-12 受理时
   确认「上传属于该用户且已完成」。
+- **归属落盘细则（冻结）**：账号鉴权实施起，C2S-7 create 的 meta.json
+  与回执（`<租户根>/.staging/receipts/<upload_id>.json`）须增记 owner
+  principal（`user_id`，取自 INT-1 核验出参）——INT-3 的归属确认以此
+  为准；租户 token 时期（1.3.0）仅有 `tenant` 字段，鉴权层置换时补齐，
+  不改变既有回执字段。
 
 ### 与既有接口的关系
 
@@ -483,6 +495,11 @@ python3 -m toolbox sessions [list|prune] [--keep N] [--tenant <t>]
   内部置换，接口形状/错误码不变）；
 - S3 两阶段上传校验（预检许可+读流复核，许可绑定请求/设备/资源/摘要，
   nonce 第二阶段不可重复消费）在 S1 实现联调时随本节一并冻结细则。
+- **投稿/收片接口有意后置**（冻结确认）：旧未发布 1.4.0 中的投稿
+  （douyin publish 准备）与收片（daily delivery）接口**不属于本次冻结
+  范围**，待用户侧收片链路联调时以新编号（C2S-15 起顺延）另行起草——
+  关联 REQ-20261019-003 §S4「自动回传后续联合验收」与
+  REQ-20261019-004（月度权益，当前 hold）。本节不含它们不是遗漏。
 
 ---
 
@@ -673,6 +690,7 @@ import-session 幂等重跑保留）。
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
 | 2026-10-19 | 1.3.0 | C2S-6~9 / SRV-4 / §2.1 | 兼容性新增：受控 HTTPS 上传通道（`https://95188.pw/api/production/v1`，Bearer 租户 token，tenant 服务端解出、路径白名单、SHA-256 复核、分块断点续传、complete 自动 import/eval）；config 新增 `server.upload_url`/`upload_token`（非空即 HTTPS 通道，客户分发包不再携带 ssh 私钥/rsync）；rsync 通道保留内部机用，行为不变。接口形状对齐 REQ-20261019-003 拟议的 `/api/production/v1`，统一账号上线后仅替换鉴权层（REQ-20261019-005） |
+| 2026-10-19 | 1.4.0（冻结） | §4A / C2S-10~14 / INT-1~3 | **接口定义冻结（按用户指示，冻结≠实施，线上契约仍 1.3.0，CONTRACT_VERSION 随双端实施发版升至 1.4.0）**；冻结后接口形状/编号/错误语义不再可改，变更须走 §0 版本纪律。同时落实端侧三条评审意见：①总则 #6 明确错误码清单为公共子集、接口专属码（如 409 device_bound）以各节为准；②INT-3 增归属落盘细则（账号鉴权实施起 create 的 meta.json/receipts 增记 owner user_id）；③确认投稿/收片接口有意后置（C2S-15 起另行起草，关联 REQ-004），非本节遗漏 |
 | 2026-10-19 | 1.4.0（草案） | §4A / C2S-10~14 / INT-1~3 / §2.1 | **草案，未冻结未实施，线上契约仍 1.3.0**：统一账号与生产准入接口全集（PC 设备鉴权登录/能力声明/生产申请、生产任务查询与受控产物读取、内部原请求核验/任务提交/回执查询），含 DSJ-PC-1 签名总则、双凭证不混用、授权不缓存、`(user_id,request_id)` 幂等、稳定错误语义、INT 编号族（新增）。为旧工作副本未发布 1.4.0 与线上 1.3.0 的逐项合并起点。冻结实施时 CONTRACT_VERSION → 1.4.0（REQ-20261019-003，服务端依据需求起草，待端侧收编权威版+三方评审） |
 | 2026-10-14 | 1.2.0 | §5.1 | 兼容性新增：events.jsonl kind `loadout` 补齐 `meta.hero`（干员名）/`meta.weapons`（枪械名列表，局内多条按窗口聚合：hero 取首条、weapons 并集保序）。服务端逐场报告逐局表新增「干员」「枪械」两列，缺失显示 "-"。无新接口，push 通道与排除规则不变；旧端/旧场次不破坏（REQ-20261014-002） |
 | 2026-10-14 | 1.1.3 | §2.2 | `site_url` 由 `http://8.133.251.179/eval/` 改为 `http://8.153.157.239/eval/`（服务器迁移：新生产=8.153.157.239，旧 8.133.251.179 转测试环境；人用地址、非机器接口，勘误级变更，机器通道不受影响。端侧曾暂记 1.1.2，并轨顺延） |
