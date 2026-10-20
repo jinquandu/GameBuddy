@@ -60,16 +60,20 @@ class ProductionUploader:
     def _request(self, method, path, body=None, data=None, timeout=600):
         """body=dict 走 JSON；data=bytes 原样（分块 PUT）。非 2xx 一律
         UploadError（含服务端 {"error":{"code","message"}} 解析）。"""
+        # 序列化必须先于签名：signer 要对"实际发送字节"做 body_sha256
+        # （DSJ-PC-1 八行串含 body 摘要；曾因顺序在后，POST 签到空体，
+        #  服务端摘要对不上 → 401 invalid_token，GET 无体故不显）
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers = {}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if self.signer:
             # 签「线上原样 path」：base 路径前缀 + 相对 path（与 account 同口径）
             wire = urllib.parse.urlsplit(self.base).path + path
             headers.update(self.signer(method, wire, data or b""))
-        if body is not None:
-            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(self.base + path, data=data,
                                      headers=headers, method=method)
         try:
