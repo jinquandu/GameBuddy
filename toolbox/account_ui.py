@@ -159,8 +159,8 @@ def login_dialog(master, api_url, production_url=None) -> dict:
             say("先点「获取验证码」拿到短信凭据再登录", warn=True)
             return
         if armed["replace"] and result["challenge"] == stale["challenge"]:
-            say("已确认换绑，但用的还是旧验证码：请先点「获取验证码」"
-                "拿新码，再登录（服务端安全设计：旧码已失效）", warn=True)
+            say("换绑已确认、新码请求中：请等新短信到达后输入再登录"
+                "（旧码已失效）", warn=True)
             return
 
         def run(replace=False):
@@ -193,8 +193,10 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                         if messagebox.askyesno("换机确认", msg, parent=win):
                             armed["replace"] = True
                             _main(lambda: say(
-                                "已确认换绑：请点「获取验证码」拿新码，"
-                                "再登录即完成换绑"))
+                                "已确认换绑：正在重新获取验证码，"
+                                "收到后输入新码点登录即完成"))
+                            _main(do_sms)     # 确认即自动重发新码（用户
+                                              # 只剩输码+登录两步，杜绝漏步）
                         else:
                             _main(lambda: say("已取消换绑"))
                     _main(ask)
