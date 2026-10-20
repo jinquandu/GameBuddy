@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -40,6 +41,12 @@ STAGES = [  # (阶段名, 显示名) —— 与 pipeline.run_pipeline 的 stage 
     ("detect", "OCR 行为检测"), ("knockdowns", "击倒切片"), ("pickups", "拾取切片"),
     ("queues", "匹配截图"), ("voice", "语音情绪评估"), ("push", "推评估包"),
 ]
+# 进度权重（合计 1.0）：detect 是大头且与视频时长成正比，可精确到分片；
+# knockdowns 按分片行计数；其余阶段开始即给阶段半程、完成给满程——
+# 跳过的阶段权重自然计入已完成（核心包 asr/speaker/voice 常跳）。
+STAGE_WEIGHT = {"download": .02, "asr": .03, "speaker": .01, "detect": .75,
+                "knockdowns": .10, "pickups": .06, "queues": .01,
+                "voice": .01, "push": .01}
 STATE_COLOR = {"idle": "dim", "run": "accent", "done": "good",
                "err": "bad", "stop": "warn"}
 
@@ -75,6 +82,10 @@ class ProgressParser:
     _RE_SESSION = re.compile(r"^场次：(.+?)，(\d+) 个分片$")
     _RE_KD = re.compile(r"共 (\d+) 个击倒片段")
     _RE_PK = re.compile(r"共 (\d+) 个拾取会话片段")
+    # 分片级进度：events.py 打印文件名截 36 字符 + 「：检测完成/复用事件流」；
+    # knockdowns 每片一行「…：N 粗簇 -> …」
+    _RE_DET_DONE = re.compile(r"^(.{1,64}?\.mp4)：(检测完成|复用事件流)")
+    _RE_KD_SHARD = re.compile(r"^(.{1,64}?\.mp4)：\d+ 粗簇")
 
     def __init__(self):
         self.stages = {name: {"status": "pending", "secs": None}
@@ -85,6 +96,22 @@ class ProgressParser:
         self.detail = ""
         self.finished = False
         self.error_line = None
+        # 进度模型（按时长）：媒体表 + 各阶段起点
+        self.dur_by_prefix = {}
+        self.total_dur = 0.0
+        self.det_done_dur = 0.0
+        self._det_counted = set()
+        self.kd_seen = set()
+        self.t0 = time.time()
+        self._stage_t0 = {}
+
+    def set_media(self, durations):
+        """喂 {文件名: 秒}（跑链前 ffprobe 探得）；空表则退化为按片数。"""
+        self.dur_by_prefix = {}
+        self.total_dur = float(sum(durations.values()) or 0)
+        for name, d in durations.items():
+            self.dur_by_prefix[Path(name).name[:36]] = float(d)
+        self.t0 = time.time()
 
     def update(self, line):
         s = line.strip()
@@ -98,6 +125,7 @@ class ProgressParser:
             mm = self._RE_START.match(body)
             if mm and mm.group(1) in self.stages:
                 self.stages[mm.group(1)]["status"] = "run"
+                self._stage_t0[mm.group(1)] = time.time()
                 return
             mm = self._RE_DONE.match(body)
             if mm and mm.group(1) in self.stages:
@@ -115,6 +143,28 @@ class ProgressParser:
             return
         if "[错误]" in s:
             self.error_line = s[:80]
+            return
+        mm = self._RE_DET_DONE.match(s)
+        if mm:
+            pre = mm.group(1)
+            hit = False
+            for k, d in self.dur_by_prefix.items():
+                if pre.startswith(k):
+                    hit = True
+                    if k not in self._det_counted:
+                        self._det_counted.add(k)
+                        self.det_done_dur += d
+                    break
+            if not hit and pre not in self._det_counted:
+                self._det_counted.add(pre)      # 无时长表：按行前缀计片数
+            return
+        mm = self._RE_KD_SHARD.match(s)
+        if mm:
+            pre = mm.group(1)
+            for k in self.dur_by_prefix:
+                if pre.startswith(k):
+                    self.kd_seen.add(k)
+                    break
             return
         mm = self._RE_KD.search(s)
         if mm:
@@ -138,6 +188,40 @@ class ProgressParser:
     def done_count(self):
         return sum(1 for s in self.stages.values()
                    if s["status"] in ("done", "skip"))
+
+    # ---------- 进度模型（按时长加权；detect 精确到分片时长比例）
+
+    def progress(self):
+        """-> (fraction 0..1, 当前阶段名)。跳过=完成；未开始阶段不加权。"""
+        frac = sum(STAGE_WEIGHT[n] for n, st in self.stages.items()
+                   if st["status"] in ("done", "skip"))
+        cur = next((n for n, _ in STAGES
+                    if self.stages[n]["status"] == "run"), None)
+        if cur == "detect":
+            if self.total_dur:
+                frac += STAGE_WEIGHT["detect"] * min(
+                    1.0, self.det_done_dur / self.total_dur)
+            elif self.parts:                    # 无时长表：按片数退化
+                frac += STAGE_WEIGHT["detect"] * min(
+                    1.0, len(self._det_counted) / self.parts)
+        elif cur == "knockdowns" and self.parts:
+            frac += STAGE_WEIGHT["knockdowns"] * min(
+                1.0, len(self.kd_seen) / self.parts)
+        elif cur:
+            frac += STAGE_WEIGHT[cur] * 0.5     # 无细粒度行：阶段中程
+        if self.finished:
+            return 1.0, cur
+        return min(frac, 0.99), cur
+
+    def eta_sec(self):
+        """按整体已用时间与当前比例外推剩余秒；样本不足返回 None。"""
+        frac, _ = self.progress()
+        if self.finished:
+            return 0
+        if frac < 0.03:
+            return None
+        el = time.time() - self.t0
+        return el * (1 - frac) / frac
 
 
 # ---------------------------------------------------------------- 本地三线统计
@@ -252,6 +336,10 @@ class PetWindow(tk.Tk):
         self.btn = ttk.Button(f, text="▶  开始跑链",
                               command=self._on_main_button)
         self.btn.pack(fill="x", ipady=5, pady=(0, 6))
+        # 进度条（按时长加权 + 剩余时间外推，仅 run 态显示）
+        self.pbar = ttk.Progressbar(f, mode="determinate", maximum=100)
+        self.plab = tk.Label(f, text="", bg=C["bg"], fg=C["dim"],
+                             font=(FONT, 9), anchor="w")
         # 账号行（契约 §4A；服务未就绪时登录窗如实提示，不降级不绕过）
         acct = ttk.Frame(f)
         acct.pack(fill="x", pady=(0, 2))
@@ -489,6 +577,32 @@ class PetWindow(tk.Tk):
                 return
         self._toggle_run()
 
+    def _probe_durations(self, addr):
+        """本地目录/文件 -> {文件名: 秒}（ffprobe 逐个探测，失败容忍）。
+        URL 场次返回空表，进度模型自动退化为按分片数。"""
+        p = Path(addr)
+        try:
+            if p.is_file():
+                vids = [p]
+            elif p.is_dir():
+                from toolbox.events import collect_videos
+                vids = collect_videos(addr)
+            else:
+                return {}
+            out = {}
+            for v in vids:
+                r = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries",
+                     "format=duration", "-of", "csv=p=0", str(v)],
+                    capture_output=True, text=True, timeout=15)
+                out[str(v)] = float(r.stdout.strip())
+            LOG.info("进度时长表：%d 个视频共 %.0f 分钟",
+                     len(out), sum(out.values()) / 60)
+            return out
+        except Exception as e:                   # noqa: BLE001 探测失败不拦跑链
+            LOG.info("进度时长探测失败（退化为按片数）：%s", e)
+            return {}
+
     def _start(self, addr, skip=()):
         # 登录门控（REQ-20261019-013）：未登录先弹登录框，成功则继续开跑
         try:
@@ -508,6 +622,7 @@ class PetWindow(tk.Tk):
                 return
         self._save_hist()
         self.parser = ProgressParser()
+        self.parser.set_media(self._probe_durations(addr))
         self._logs = []
         self._retry_skip = None
         self._last_addr = addr
@@ -605,18 +720,42 @@ class PetWindow(tk.Tk):
                         else "▶  开始跑链")
         self._tray_tip("完成" if self.state == "done" else
                        ("出错，点续跑" if self.state == "err" else "待命"))
+        if self.state == "done":
+            self.pbar["value"] = 100
+            self.after(4000, self._hide_progress)   # 满格停留一会儿再收
+        else:
+            self._hide_progress()
+
+    def _hide_progress(self):
+        self.pbar.pack_forget()
+        self.plab.pack_forget()
 
     def _render(self):
         p = self.parser
         if self.state == "run":
-            bits = [f"跑链 {p.done_count()}/{len(STAGES)}"]
-            cur = p.running_stage()
-            if cur:
-                bits.append(f"{cur}中")
+            frac, cur = p.progress()
+            eta = p.eta_sec()
+            self.pbar.pack_forget()
+            self.pbar.pack(fill="x", pady=(0, 2))
+            self.plab.pack_forget()
+            self.plab.pack(fill="x", pady=(0, 6))
+            self.pbar["value"] = frac * 100
+            bits = []
+            disp = dict(STAGES).get(cur, "")
+            if disp:
+                bits.append(disp)
+            bits.append(f"{int(frac * 100)}%")
+            if eta is not None:
+                bits.append(f"剩约{eta / 60:.0f}分" if eta >= 90
+                            else "即将完成")
+            el = (time.time() - p.t0) / 60
+            if el >= 1:
+                bits.append(f"已用{el:.0f}分")
             if p.session:
-                bits.append(p.session[:16])
-            self._set_status(" · ".join(bits), C["accent"])
-            self._tray_tip(" ".join(bits[:2]))
+                bits.append(p.session[:14])
+            text = " · ".join(bits)
+            self._set_status(text, C["accent"])
+            self._tray_tip(text)
 
     # ---------- 状态行（常驻一行文字；出错常驻，其余短闪）
 
