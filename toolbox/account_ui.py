@@ -21,6 +21,10 @@ from tkinter import ttk, messagebox
 
 from toolbox import device_identity as di
 from toolbox.account import (AccountClient, AccountError, ServiceNotReady)
+from toolbox.logs import get as _getlog
+
+ALOG = _getlog("account")   # 账号尝试留痕（脱敏：阶段/错误码/HTTP/耗时；
+                            # 手机号、验证码、token 绝不入日志）
 
 
 def _err_text(stage, exc, t0):
@@ -74,6 +78,7 @@ def login_dialog(master, api_url, production_url=None) -> dict:
     # 换绑预置（服务端语义，core.py：409 时验证码已一次性消费，换绑必须
     # 「确认后重新获取新码登录」——确认后置位，下一次登录自动 replace）
     armed = {"replace": False}
+    stale = {"challenge": None}     # 409 时所用的 challenge：仍用它登录=旧码
 
     def say(text, warn=False):
         st.config(text=text, fg="#C0392B" if warn else "#5A7A4F")
@@ -136,10 +141,14 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                 ok = bool(result["challenge"])
                 msg = ("验证码已发送，查收短信" if ok
                        else "服务未返回验证凭据（challenge_id），稍后再试")
+                ALOG.info("sms ok=%s 耗时%dms", ok, (time.time() - t0) * 1000)
                 _main(lambda m=msg, k=ok: say(m, warn=not k))
             except AccountError as e:
+                ALOG.warning("sms 失败 code=%s status=%s 耗时%dms",
+                             e.code, e.status, (time.time() - t0) * 1000)
                 _fail("发送", e, t0)
             except Exception as ex:            # noqa: BLE001 未知异常也要落地
+                ALOG.warning("sms 异常 %r", ex)
                 _fail("发送", ex, t0)
         _bg(run)
 
@@ -148,6 +157,10 @@ def login_dialog(master, api_url, production_url=None) -> dict:
         code = code_var.get().strip()
         if not result.get("challenge"):
             say("先点「获取验证码」拿到短信凭据再登录", warn=True)
+            return
+        if armed["replace"] and result["challenge"] == stale["challenge"]:
+            say("已确认换绑，但用的还是旧验证码：请先点「获取验证码」"
+                "拿新码，再登录（服务端安全设计：旧码已失效）", warn=True)
             return
 
         def run(replace=False):
@@ -159,9 +172,15 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                 sess = cli.login(result["challenge"], code, phone=phone,
                                  replace_device=replace)
                 result["sess"] = sess
+                ALOG.info("login ok replace=%s 耗时%dms",
+                          replace, (time.time() - t0) * 1000)
                 _main(win.destroy)
             except AccountError as e:
+                ALOG.warning("login 失败 code=%s status=%s replace=%s "
+                             "耗时%dms", e.code, e.status, replace,
+                             (time.time() - t0) * 1000)
                 if e.code == "device_bound":
+                    stale["challenge"] = result["challenge"]
                     b = (e.data.get("device_binding")
                          or e.data.get("bound_device") or {})
                     digest = b.get("digest", "未知设备") if isinstance(b, dict) \
@@ -182,6 +201,7 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                     return
                 _fail("登录", e, t0)
             except Exception as ex:            # noqa: BLE001
+                ALOG.warning("login 异常 %r", ex)
                 _fail("登录", ex, t0)
         _bg(lambda: run(False))
 
