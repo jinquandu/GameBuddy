@@ -362,9 +362,16 @@ def push(session, mode="eval", dry=False, run_eval=False, no_import=False,
     cfg = load_config()["server"]
     if cfg.get("upload_url"):
         if not cfg.get("upload_token"):
-            raise RuntimeError(
-                "已配置 server.upload_url 但缺少 server.upload_token"
-                "（HTTPS 通道不回退 SSH；token 由运维按租户发放）")
+            # 账号模式上传（REQ-003 拆解 3.6，用户 2026-10-20 批准方案②）：
+            # 无租户 token → 用登录会话 Bearer + DSJ-PC-1 签名头，服务端
+            # 经 INT-1 核验并解出 usr_* 租户——客户机零配置 token
+            from toolbox.account import require_login
+            try:
+                require_login()
+            except Exception as e:          # noqa: BLE001 未登录/未配账号服务
+                raise RuntimeError(
+                    "HTTPS 上传未配置 upload_token（账号模式），需先在桌宠"
+                    f"界面登录：{e}") from None
         return _push_https(cfg, session, mode, dry, run_eval, no_import, tenant)
     alias, remote = cfg["ssh_alias"], _tenant_root(cfg, tenant)
     disc = discover_session(session)
@@ -506,8 +513,20 @@ def _push_https(cfg, session, mode, dry, run_eval, no_import, tenant_override):
         print("（dry-run：未连接服务端）")
         return
     from toolbox.uploader import ProductionUploader, push_files
+    if cfg.get("upload_token"):
+        uploader = ProductionUploader(cfg["upload_url"], cfg["upload_token"])
+    else:
+        # 账号模式：Bearer=登录会话 token，签名头带同一 bearer（DSJ-PC-1
+        # 规范化串含 bearer 摘要，与 account 客户端同口径）
+        from toolbox import device_identity as _di
+        from toolbox.account import require_login
+        _sess = require_login()
+        _b = _sess["bearer"]
+        uploader = ProductionUploader(
+            cfg["upload_url"], token=_b,
+            signer=lambda m, w, d: _di.sign_request(m, w, d, _b))
     receipt = push_files(
-        ProductionUploader(cfg["upload_url"], cfg["upload_token"]),
+        uploader,
         disc["session"], mode, [tuple(f) for f in files], local_map,
         manifest, run_eval=run_eval, no_import=no_import)
     state = receipt.get("state")
