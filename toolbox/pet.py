@@ -300,10 +300,19 @@ class PetWindow(tk.Tk):
         hist = self._load_hist()
         self.run_eval_var = tk.BooleanVar(value=hist["run_eval"])
         self.watch_dir = hist.get("watch_dir", "")   # 后台日任务的目录兜底
+        # 断链续跑（跨重启）：上次出错的场次+已完成阶段，启动即亮「↻ 续跑」
+        self._retry_saved = {}
+        r = hist.get("retry") or {}
+        if r.get("addr") and r.get("skip") and Path(r["addr"]).exists():
+            self._retry_saved = r
+            self._retry_skip = list(r["skip"])
+            self._last_addr = r["addr"]
         self.daily_stop = threading.Event()
         self.daily_thread = None
 
         self._build()
+        if self._retry_saved:
+            self.btn.config(text="↻  续跑")
         if address:
             self.addr_var.set(address)
         elif hist["addresses"]:
@@ -372,7 +381,8 @@ class PetWindow(tk.Tk):
             d = {}
         return {"addresses": d.get("addresses", []),
                 "run_eval": bool(d.get("run_eval", False)),
-                "watch_dir": d.get("watch_dir", "")}
+                "watch_dir": d.get("watch_dir", ""),
+                "retry": d.get("retry") or {}}   # 断链续跑：跨重启一键续
 
     def _save_hist(self):
         HIST.parent.mkdir(parents=True, exist_ok=True)
@@ -382,7 +392,8 @@ class PetWindow(tk.Tk):
             addrs.insert(0, addr)
         HIST.write_text(json.dumps(
             {"addresses": addrs[:8], "run_eval": bool(self.run_eval_var.get()),
-             "watch_dir": self.watch_dir},
+             "watch_dir": self.watch_dir,
+             "retry": getattr(self, "_retry_saved", None) or {}},
             ensure_ascii=False, indent=1), encoding="utf-8")
 
     # ---------- 账号（契约 §4A，C2S-10/11）
@@ -569,12 +580,18 @@ class PetWindow(tk.Tk):
         self._start(addr)
 
     def _on_main_button(self):
-        """主按钮分发：出错态=续跑（--skip 已完成阶段），其余=开始/停止。"""
-        if self.state == "err" and self._retry_skip:
-            addr = self._last_addr or self.addr_var.get().strip()
-            if addr:
-                self._start(addr, skip=self._retry_skip)
-                return
+        """主按钮分发：出错/带断链存档=续跑（--skip 已完成阶段），其余=开始/停止。"""
+        if (self.state == "err" or
+                (self.state in ("idle", "stop") and self._retry_saved)):
+            addr = (self._last_addr or "").strip() or self.addr_var.get().strip()
+            cur = self.addr_var.get().strip()
+            # 跨重启续跑只在地址栏为空或与断链场次一致时生效；填了新址视为新跑
+            if self._retry_skip and (self.state == "err" or not cur
+                                     or cur == self._retry_saved.get("addr")
+                                     or cur == addr):
+                if addr:
+                    self._start(addr, skip=self._retry_skip)
+                    return
         self._toggle_run()
 
     def _probe_durations(self, addr):
@@ -701,6 +718,8 @@ class PetWindow(tk.Tk):
             except subprocess.TimeoutExpired:
                 code = -1
         if code == 0 and self.parser.finished:
+            self._retry_saved = {}              # 跑通即清断链存档
+            self._save_hist()
             st = latest_stats()
             name = (st["session"] or self.parser.session or "")[:18]
             self._set_state("done", f"完成！{name} 击倒{_or_dash(st['knockdowns'])} "
@@ -714,6 +733,11 @@ class PetWindow(tk.Tk):
             self._retry_skip = [name for name, _ in STAGES
                                 if self.parser.stages[name]["status"]
                                 in ("done", "skip")]
+            self._retry_saved = {                 # 落盘：跨重启一键续跑
+                "addr": self._last_addr or self.addr_var.get().strip(),
+                "skip": self._retry_skip,
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S")}
+            self._save_hist()
             LOG.warning("跑链失败：rc=%s err=%s 可续跑（跳过 %d 个已完成阶段）",
                         code, why, len(self._retry_skip))
         self.btn.config(text="↻  续跑" if self.state == "err"
