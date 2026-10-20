@@ -126,13 +126,13 @@ def login_dialog(master, api_url, production_url=None) -> dict:
         msg = _err_text(stage, exc, t0)
         _main(lambda m=msg: say(m, warn=True))
 
-    def do_sms():
+    def do_sms(auto=False):
         phone = phone_var.get().strip()
         if not phone.isdigit() or len(phone) != 11:
             say("手机号不对呀（11 位数字）", warn=True)
             return
 
-        def run():
+        def run(retry=True):
             t0 = time.time()
             _main(lambda: say("发送验证码…"))
             try:
@@ -141,16 +141,26 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                 ok = bool(result["challenge"])
                 msg = ("验证码已发送，查收短信" if ok
                        else "服务未返回验证凭据（challenge_id），稍后再试")
-                ALOG.info("sms ok=%s 耗时%dms", ok, (time.time() - t0) * 1000)
+                ALOG.info("sms ok=%s auto=%s 耗时%dms",
+                          ok, auto, (time.time() - t0) * 1000)
                 _main(lambda m=msg, k=ok: say(m, warn=not k))
             except AccountError as e:
-                ALOG.warning("sms 失败 code=%s status=%s 耗时%dms",
-                             e.code, e.status, (time.time() - t0) * 1000)
+                ALOG.warning("sms 失败 code=%s status=%s auto=%s 耗时%dms",
+                             e.code, e.status, auto, (time.time() - t0) * 1000)
+                # 换绑自动重发撞 60s 频率窗：按服务端 retry_after 自动重试一次
+                if e.code == "rate_limited" and retry:
+                    wait = int(e.data.get("retry_after") or 60)
+                    wait = max(5, min(wait, 120))
+                    _main(lambda w=wait: say(
+                        f"发码频率限制：{w}s 后自动重发新码，请稍候…"))
+                    _main(lambda w=wait * 1000: win.after(
+                        w, lambda: _bg(lambda: run(retry=False))))
+                    return
                 _fail("发送", e, t0)
             except Exception as ex:            # noqa: BLE001 未知异常也要落地
                 ALOG.warning("sms 异常 %r", ex)
                 _fail("发送", ex, t0)
-        _bg(run)
+        _bg(lambda: run())
 
     def do_login():
         phone = phone_var.get().strip()
