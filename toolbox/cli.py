@@ -501,6 +501,15 @@ def build_parser():
 
 
 def main(argv=None):
+    if getattr(sys, "frozen", False):
+        # 客户机零依赖：捆绑的 ffmpeg/ffprobe 落在 _internal，裸名 spawn
+        # 只认 PATH——把 _internal 前置进 PATH（否则首调必 WinError 2，
+        # 2026-10-20 干净机复现）。对本机已装 ffmpeg 无影响（PATH 顺序在前）。
+        import os as _os
+        from pathlib import Path as _Path
+        _int = _Path(sys.executable).resolve().parent / "_internal"
+        if _int.is_dir():
+            _os.environ["PATH"] = str(_int) + _os.pathsep + _os.environ.get("PATH", "")
     for s in (sys.stdout, sys.stderr):
         enc = getattr(s, "encoding", None)   # --windowed 无管道时为 None
         if enc and enc.lower() != "utf-8":

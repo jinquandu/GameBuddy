@@ -24,6 +24,8 @@ if exist dist\DashijiePet\data (
 )
 py -3 -m PyInstaller --noconfirm --clean --windowed --name DashijiePet ^
   --collect-data rapidocr_onnxruntime ^
+  --add-binary "C:\Users\quinc\ffmpeg\bin\ffmpeg.exe;." ^
+  --add-binary "C:\Users\quinc\ffmpeg\bin\ffprobe.exe;." ^
   --hidden-import pystray._win32 ^
   --hidden-import toolbox._scan_worker ^
   --hidden-import toolbox._loadout_batch_worker ^
