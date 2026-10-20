@@ -71,6 +71,9 @@ def login_dialog(master, api_url, production_url=None) -> dict:
     cli = AccountClient(api_url, production_url)
     result = {"sess": {}, "challenge": None}
     busy = {"on": False}
+    # 换绑预置（服务端语义，core.py：409 时验证码已一次性消费，换绑必须
+    # 「确认后重新获取新码登录」——确认后置位，下一次登录自动 replace）
+    armed = {"replace": False}
 
     def say(text, warn=False):
         st.config(text=text, fg="#C0392B" if warn else "#5A7A4F")
@@ -149,6 +152,7 @@ def login_dialog(master, api_url, production_url=None) -> dict:
 
         def run(replace=False):
             t0 = time.time()
+            replace = replace or armed["replace"]
             _main(lambda m=f"登录中…{('（换机确认）') if replace else ''}":
                   say(m))
             try:
@@ -158,15 +162,22 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                 _main(win.destroy)
             except AccountError as e:
                 if e.code == "device_bound":
-                    bound = (e.data.get("bound_device") or {})
-                    msg = ("该账号已绑定其他电脑（%s）。\n换绑会使旧电脑登录失效，"
-                           "确定换绑到本机吗？" % bound.get("digest", "未知设备"))
-                    # 确认框回主线程；同意后再回后台线程重试（replace=True）
+                    b = (e.data.get("device_binding")
+                         or e.data.get("bound_device") or {})
+                    digest = b.get("digest", "未知设备") if isinstance(b, dict) \
+                        else str(b)
+                    msg = ("该账号已绑定其他电脑（%s）。\n换绑会使旧电脑登录"
+                           "失效，确定换绑到本机吗？\n\n确认后请重新获取验证码，"
+                           "用新码登录即完成换绑\n（服务端安全设计：验证码一次"
+                           "性，换绑须用新码）" % digest)
                     def ask():
                         if messagebox.askyesno("换机确认", msg, parent=win):
-                            _bg(lambda: run(True))
+                            armed["replace"] = True
+                            _main(lambda: say(
+                                "已确认换绑：请点「获取验证码」拿新码，"
+                                "再登录即完成换绑"))
                         else:
-                            say("已取消换绑")
+                            _main(lambda: say("已取消换绑"))
                     _main(ask)
                     return
                 _fail("登录", e, t0)
