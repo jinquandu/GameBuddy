@@ -611,7 +611,8 @@ class PetWindow(tk.Tk):
                 r = subprocess.run(
                     ["ffprobe", "-v", "error", "-show_entries",
                      "format=duration", "-of", "csv=p=0", str(v)],
-                    capture_output=True, text=True, timeout=15)
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=proc.NO_WINDOW)
                 out[str(v)] = float(r.stdout.strip())
             LOG.info("进度时长表：%d 个视频共 %.0f 分钟",
                      len(out), sum(out.values()) / 60)

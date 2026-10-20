@@ -23,6 +23,7 @@ import sys
 import time
 from pathlib import Path
 
+from toolbox import proc
 from toolbox.config import DATA, ROOT, load_config
 
 QUEUE_FILE = DATA / ".folder_watch.json"
@@ -188,7 +189,7 @@ def _kill_tree(proc):
         return
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       capture_output=True)
+                       capture_output=True, creationflags=proc.NO_WINDOW)
     else:
         proc.kill()
 
