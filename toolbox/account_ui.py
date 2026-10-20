@@ -75,9 +75,26 @@ def login_dialog(master, api_url, production_url=None) -> dict:
     cli = AccountClient(api_url, production_url)
     result = {"sess": {}, "challenge": None}
     busy = {"on": False}
+
+    # 换绑确认持久化：409 确认后若关窗/重开，新码登录仍自动 replace，
+    # 不必再吃一轮 409+短信（标记随登录成功清除；明文无敏感信息）
+    def _armed_save(on):
+        try:
+            f = di.DEVICE_DIR / "replace_armed"
+            if on:
+                f.write_text("1", encoding="utf-8")
+            elif f.exists():
+                f.unlink()
+        except OSError:
+            pass
+
     # 换绑预置（服务端语义，core.py：409 时验证码已一次性消费，换绑必须
     # 「确认后重新获取新码登录」——确认后置位，下一次登录自动 replace）
     armed = {"replace": False}
+    try:
+        armed["replace"] = (di.DEVICE_DIR / "replace_armed").exists()
+    except OSError:
+        pass
     stale = {"challenge": None}     # 409 时所用的 challenge：仍用它登录=旧码
 
     def say(text, warn=False):
@@ -182,6 +199,8 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                 sess = cli.login(result["challenge"], code, phone=phone,
                                  replace_device=replace)
                 result["sess"] = sess
+                if armed["replace"]:
+                    _armed_save(False)     # 换绑完成，清持久标记
                 ALOG.info("login ok replace=%s 耗时%dms",
                           replace, (time.time() - t0) * 1000)
                 _main(win.destroy)
@@ -202,12 +221,13 @@ def login_dialog(master, api_url, production_url=None) -> dict:
                     def ask():
                         if messagebox.askyesno("换机确认", msg, parent=win):
                             armed["replace"] = True
+                            _armed_save(True)      # 跨关窗保留：下次登录免再确认
                             _main(lambda: say(
                                 "已确认换绑：正在重新获取验证码，"
                                 "收到后输入新码点登录即完成"))
-                            _main(do_sms)     # 确认即自动重发新码（用户
-                                              # 只剩输码+登录两步，杜绝漏步）
+                            _main(lambda: do_sms(auto=True))
                         else:
+                            _armed_save(False)
                             _main(lambda: say("已取消换绑"))
                     _main(ask)
                     return
