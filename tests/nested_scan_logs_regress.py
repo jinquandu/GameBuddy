@@ -7,6 +7,7 @@
    尾部快照（512KB 截断+掐行首），manifest 带 logs 列表；video 模式不带。
    （服务端白名单放行=配合项，端侧不因此重试。）
 """
+import json
 import os
 import sys
 import tempfile
@@ -130,6 +131,71 @@ def main():
                 except RuntimeError:
                     raised = True          # video 只认源片表,缺 video/ 结构会报
                 check(True, "video 模式路径不注入日志（结构校验按既有行为）")
+
+                # ---- ②续:白名单未放行 → create 拒 → 弃日志降级重建 ----
+                # 降级逻辑全方法级 mock(不起 HTTP——mock 服务端在 Windows
+                # keep-alive/半包上反复踩坑,而这里要验的只是 push_files 的
+                # 降级控制流):create 见 logs 前缀 → 400 invalid_path;
+                # 去日志后放行;status/put_chunk/complete 按内存状态答
+                from toolbox import uploader as up
+
+                calls = {"create": []}
+                completed = {"n": 0}
+
+                def fake_create(self, session, mode, files, run_eval=False):
+                    calls["create"].append([f[0] for f in files])
+                    if any("/logs/" in f[0] for f in files):
+                        raise up.UploadError("invalid_path", "logs not allowed",
+                                             400)
+                    self._mock_files = [
+                        {"path": f[0], "size": int(f[1]), "received": 0}
+                        for f in files]
+                    return {"upload_id": "u9", "tenant": "t"}
+
+                def fake_status(self, upload_id):
+                    return {"state": "open", "files": self._mock_files}
+
+                def fake_put(self, upload_id, idx, offset, blob):
+                    self._mock_files[idx]["received"] = \
+                        self._mock_files[idx]["size"]
+                    return {"path": "x",
+                            "received": self._mock_files[idx]["received"]}
+
+                def fake_complete(self, upload_id, manifest, run_eval=False,
+                                  no_import=False):
+                    completed["n"] += 1
+                    return {"state": "imported", "session": "s-log",
+                            "tenant": "t", "remapped": 0}
+
+                up.ProductionUploader.create = fake_create
+                up.ProductionUploader.status = fake_status
+                up.ProductionUploader.put_chunk = fake_put
+                up.ProductionUploader.complete = fake_complete
+                orig = (up.ProductionUploader.create,
+                        up.ProductionUploader.status,
+                        up.ProductionUploader.put_chunk,
+                        up.ProductionUploader.complete)
+                try:
+                    up2 = up.ProductionUploader(
+                        "http://mock.invalid/api/production/v1", "tok")
+                    up2.check_capabilities = lambda: None
+                    files3, lmap3, man3 = transfer._plan_files(
+                        disc, "eval", log_dir=logs_dir)
+                    rcpt = up.push_files(up2, "s-log-degrade", "eval",
+                                         [tuple(f) for f in files3],
+                                         lmap3, man3)
+                    check(rcpt.get("state") == "imported",
+                          "白名单未放行:弃日志降级后 complete 收口成功")
+                    check(len(calls["create"]) == 2 and
+                          all("/logs/" not in p
+                              for p in calls["create"][1]),
+                          "降级=去日志后二次 create(2 次调用)")
+                    check(completed["n"] == 1, "complete 恰一次收口")
+                finally:
+                    (up.ProductionUploader.create,
+                     up.ProductionUploader.status,
+                     up.ProductionUploader.put_chunk,
+                     up.ProductionUploader.complete) = orig
             finally:
                 pass  # DATA 未打桩（log_dir 参数化）
         finally:

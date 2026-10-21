@@ -255,7 +255,21 @@ def push_files(uploader, session, mode, files, local_map, manifest,
         except UploadError:
             upload_id = None                       # 过期/不存在：新建
     if not upload_id:
-        r = uploader.create(session, mode, files, run_eval=run_eval)
+        try:
+            r = uploader.create(session, mode, files, run_eval=run_eval)
+        except UploadError as e:
+            # 日志被白名单拒（REQ-20261021-004② 配合项未放行）→ 弃日志重建
+            if e.code in ("invalid_path", "invalid_request") and \
+                    any("/logs/" in f[0] for f in files):
+                uploader.echo("服务端暂未放行日志上传，本包去日志上传"
+                              "（正式产物不受影响）")
+                files = [f for f in files if "/logs/" not in f[0]]
+                if isinstance(manifest, dict) and manifest.get("logs"):
+                    manifest["logs"] = []
+                sig = files_signature(files)
+                r = uploader.create(session, mode, files, run_eval=run_eval)
+            else:
+                raise
         upload_id = r["upload_id"]
         uploader.echo(f"上传会话 {upload_id} -> 租户 {r.get('tenant')}"
                       f"（{len(files)} 个文件，"
@@ -263,6 +277,20 @@ def push_files(uploader, session, mode, files, local_map, manifest,
         save_upload_id(session, mode, sig, upload_id)
         st = uploader.status(upload_id)
     received = [f["received"] for f in st["files"]]
+    # 日志文件可弃（REQ-20261021-004②）：服务端白名单未放行
+    # sessions/<场次>/logs/ 前缀时 complete/create 会拒——降级去日志
+    # 重收口，正式产物不受牵连（打点由调用方 echo 提示）。
+    def _strip_logs():
+        keep = [(f, m) for f, m in zip(files, received)
+                if "/logs/" not in f[0]]
+        if len(keep) == len(files):
+            return False
+        del files[:], received[:]
+        files.extend(f for f, _ in keep)
+        received.extend(r for _, r in keep)
+        if isinstance(manifest, dict) and manifest.get("logs"):
+            manifest["logs"] = []
+        return True
     for attempt in (1, 2, 3):
         bad = -1
         for idx, (rel, size, sha) in enumerate(files):
@@ -277,6 +305,14 @@ def push_files(uploader, session, mode, files, local_map, manifest,
         except UploadError as e:
             # 校验失败：服务端已清零出错文件，本轮重传后重试 complete
             if e.code != "checksum_mismatch" or attempt == 3:
+                # 日志被服务端拒（白名单未放行）→ 弃日志保产物
+                if e.code in ("invalid_path", "invalid_request") and \
+                        any("/logs/" in f[0] for f in files) and _strip_logs():
+                    uploader.echo("服务端暂未放行日志上传，本包去日志重试"
+                                  "（正式产物不受影响）")
+                    return uploader.complete(upload_id, manifest,
+                                             run_eval=run_eval,
+                                             no_import=no_import)
                 raise
             bad = e.data.get("index", -1)
             if bad < 0 or bad >= len(files):
