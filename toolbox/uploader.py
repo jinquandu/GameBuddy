@@ -237,6 +237,9 @@ def push_files(uploader, session, mode, files, local_map, manifest,
     complete 校验失败（422 checksum_mismatch）时服务端清零出错文件，
     此处重传该文件后重试 complete（至多 3 轮）。
     """
+    # REQ-20261021-002：eval 默认开启由上层（transfer.push/pipeline/CLI）
+    # 决定；此处只兜底模式门——video 包恒不触发评估（create/complete 一并）
+    run_eval = bool(run_eval) and mode == "eval"
     uploader.check_capabilities()
     sig = files_signature(files)
     upload_id = load_upload_id(session, mode, sig)

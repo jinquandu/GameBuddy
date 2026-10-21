@@ -302,7 +302,11 @@ def build_parser():
                     help="eval=评估包：JSON+三线切片+L1缓存（默认）；"
                          "video=成片包：源片全量（~4-5G，确认做片才推）")
     sp.add_argument("--run-eval", action="store_true",
-                    help="上传后触发服务端评估链（打分+报告+review 页）")
+                    help="上传后触发服务端评估链（打分+报告+review 页）；"
+                         "评估包自 2026-10-21 起默认开启，本旗标为显式确认")
+    sp.add_argument("--no-run-eval", action="store_false", dest="run_eval",
+                    help="只 import 不评分（服务端调试用；REQ-20261021-002）")
+    sp.set_defaults(run_eval=True)
     sp.add_argument("--no-import", action="store_true",
                     help="不触发服务端 import-session（调试用）")
     sp.add_argument("--tenant", default=None,
@@ -487,7 +491,11 @@ def build_parser():
                     help="跳过的阶段：download asr speaker detect knockdowns "
                          "pickups voice push")
     sp.add_argument("--run-eval", action="store_true",
-                    help="push 后触发服务端评估链（打分+报告+review 页）")
+                    help="push 后触发服务端评估链（打分+报告+review 页）；"
+                         "自 2026-10-21 起默认开启，本旗标为显式确认")
+    sp.add_argument("--no-run-eval", action="store_false", dest="run_eval",
+                    help="只 import 不评分（服务端调试用；REQ-20261021-002）")
+    sp.set_defaults(run_eval=True)
     sp.set_defaults(func=cmd_pipeline)
 
     sp = sub.add_parser(

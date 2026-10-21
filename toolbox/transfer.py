@@ -348,17 +348,20 @@ def _tenant_root(cfg, tenant=None):
     return f"{cfg['remote_root']}/tenants/{t}"
 
 
-def push(session, mode="eval", dry=False, run_eval=False, no_import=False,
+def push(session, mode="eval", dry=False, run_eval=True, no_import=False,
          tenant=None):
     """上传会话产物到服务端。mode: eval=评估包（默认）| video=成片包（源片）。
 
     双通道（契约 1.3.0）：config server.upload_url 非空 → 受控 HTTPS 上传
     （客户机；Bearer token 鉴权，tenant 由服务端解出，complete 自动 import）；
     为空 → rsync over ssh 直达服务端 data/ 工作树（内部机），两种模式完成后
-    （除非 --no-import）均触发容器内 import-session 路径重映射+状态登记，
-    --run-eval 评估包可连跑评估链。多租户：rsync 通道 --tenant 覆盖
+    （除非 --no-import）均触发容器内 import-session 路径重映射+状态登记。
+    run_eval 自 2026-10-21（REQ-20261021-002）**评估包默认开启**——mode=eval
+    的 push 等价 --run-eval（complete run_eval:true），--no-run-eval 显式关；
+    成片包（video）恒不触发评估。多租户：rsync 通道 --tenant 覆盖
     server.tenant 配置；HTTPS 通道 tenant 只由 token 决定。
     """
+    run_eval = bool(run_eval) and mode == "eval"   # video 恒不评（双通道统一门）
     cfg = load_config()["server"]
     if cfg.get("upload_url"):
         if not cfg.get("upload_token"):

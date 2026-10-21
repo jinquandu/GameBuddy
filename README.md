@@ -165,8 +165,8 @@ python -m toolbox pet          # 素朴小窗：填地址一键跑全链
   阶段只重跑失败环节及之后；语音评估按分P隔离——个别分P无 host 语音
   （如秒级测试段）只跳过该分P，不再炸整链；
 - 桌面录制入口已移出界面（CLI：`python -m toolbox screenrec`）；
-  租户 ID 只在 `config.yaml` 的 `server.tenant` 维护；`--run-eval`
-  开关记忆在 `data/pet/history.json` 的 `run_eval`；
+  租户 ID 只在 `config.yaml` 的 `server.tenant` 维护；评估链默认开启
+  （REQ-20261021-002：评估包上传后自动评分，`--no-run-eval` 显式关闭）；
 - 调试：`PET_SNAPSHOT=<目录> python -m toolbox pet` 启动后自动对各状态截屏；
   跑链全量输出落 `data/logs/pipeline.log`（排障先查这里）。
 
@@ -195,8 +195,8 @@ python -m toolbox pull --template single_best    # 拉回服务端成片到 data
 | `pickups <目标...>` | 拾取会话裁剪（按「一次开箱/开背包会话」口径） |
 | `queues <目标...>` | 点击匹配时刻截图：每局回溯定位「匹配中/出发」按钮帧抽 jpg（只读已有事件流，`--force` 重扫） |
 | `voice [目标...] [--html]` | 主播语音情绪评估：粗扫选段打分 → m4a 切片 + review.html |
-| `pipeline <BV/URL/场次目录>` | 全链串起来（`--run-eval` 触发服务端评估） |
-| `push <场次> [--mode video]` | 上传评估包（默认）/ 成片包（源片全量） |
+| `pipeline <BV/URL/场次目录>` | 全链串起来（末段自动 push+评估，`--no-run-eval` 只传不评） |
+| `push <场次> [--mode video]` | 上传评估包（默认连评）/ 成片包（源片全量，不评） |
 | `pull [--template 名]` | 拉回服务端 remix 成片 + 发布包 |
 | `ingest <视频...>` / `list` | 素材登记（ffprobe 元数据）/ 列出已登记视频 |
 

@@ -298,7 +298,10 @@ class PetWindow(tk.Tk):
         self._last_addr = ""
         self._snap_queue = []
         hist = self._load_hist()
-        self.run_eval_var = tk.BooleanVar(value=hist["run_eval"])
+        # run_eval 无 UI 勾选框（历史遗留变量，UI 已不可改）：REQ-20261021-002
+        # 评估链默认开启，恒 True；旧 hist 里残留的 false 不再生效（用户无入口
+        # 设置过它，一直是旧默认值），显式关闭走 --no-run-eval 旗标
+        self.run_eval_var = tk.BooleanVar(value=True)
         self.watch_dir = hist.get("watch_dir", "")   # 后台日任务的目录兜底
         # 断链续跑（跨重启）：上次出错的场次+已完成阶段，启动即亮「↻ 续跑」
         self._retry_saved = {}
@@ -754,8 +757,9 @@ class PetWindow(tk.Tk):
                     "pipeline", addr]
         if skip:
             args += ["--skip", *skip]
-        if self.run_eval_var.get():
-            args.append("--run-eval")
+        # 显式传旗标：默认评估链开启（REQ-20261021-002），--no-run-eval 关
+        args.append("--run-eval" if self.run_eval_var.get()
+                    else "--no-run-eval")
         LOG.info("跑链启动：%s（skip=%s run_eval=%s）",
                  addr, list(skip) or "无", self.run_eval_var.get())
         env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")

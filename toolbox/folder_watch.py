@@ -204,13 +204,17 @@ def kill_current():
 
 
 def run_pipeline_subprocess(target_path):
-    """跑链子进程（与 pet 同配方：exe 形态自身即 CLI；UTF-8；管道收集）。"""
+    """跑链子进程（与 pet 同配方：exe 形态自身即 CLI；UTF-8；管道收集）。
+
+    显式带 --run-eval：后台日任务链曾漏传该参数，评估包上传后打标站
+    0 片段、均须服务端人工补跑（REQ-20261021-002 根因位）；CLI 虽已
+    默认开启，此处仍显式传防默认再漂移。"""
     global _CURRENT
     if getattr(sys, "frozen", False):
-        args = [sys.executable, "pipeline", target_path]
+        args = [sys.executable, "pipeline", target_path, "--run-eval"]
     else:
         args = [sys.executable, "-X", "utf8", "-m", "toolbox",
-                "pipeline", target_path]
+                "pipeline", target_path, "--run-eval"]
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     proc = subprocess.Popen(args, cwd=str(ROOT), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

@@ -36,8 +36,12 @@ def _voice_line_ready(config):
     return True, ""
 
 
-def run_pipeline(target, config=None, skip=(), run_eval=False):
-    """按阶段顺序跑，已有产物自动复用（各链路自身幂等）。返回各阶段耗时。"""
+def run_pipeline(target, config=None, skip=(), run_eval=True):
+    """按阶段顺序跑，已有产物自动复用（各链路自身幂等）。返回各阶段耗时。
+
+    run_eval 默认 True（REQ-20261021-002）：跑链末段 push 评估包默认触发
+    服务端评估链——此前后台日任务链不透传该参数，上传后打标站 0 片段、
+    均须服务端人工补跑 eval。显式关闭走 CLI --no-run-eval。"""
     from toolbox.account import require_login
     from toolbox.config import load_config
     config = config or load_config()
