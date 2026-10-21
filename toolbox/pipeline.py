@@ -169,13 +169,26 @@ def run_pipeline(target, config=None, skip=(), run_eval=True):
 
     def do_push():
         from toolbox.transfer import push
-        push(target, mode="eval", run_eval=run_eval)
+
+        def on_produce(s):
+            """成片状态透传到 stdout（REQ-20261021-005）：父进程(pet/CLI)
+            的日志流直接可见；done 时给出作品页打开指引。"""
+            state = (s or {}).get("state")
+            if state in ("queued", "waiting"):
+                print("[pipeline] 成片生成中（云端渲染约 20 分钟，无需等待）…")
+            elif state == "done":
+                print("[pipeline] 成片完成！3 条候选已就绪，打开作品页挑一条吧。")
+            elif state == "failed":
+                err = (s.get("error") or "")[-300:]
+                print(f"[pipeline] 成片生成失败：{err}")
+                print("[pipeline] 可重新上传重试（不影响原始录像）。")
+
+        push(target, mode="eval", run_eval=run_eval, on_produce=on_produce)
         return "ok"
 
     stage("push", do_push)
 
     print("[pipeline] 全链完成。" + " ".join(f"{k}={v}s" for k, v in spent.items()))
-    print("[pipeline] 下一步：评估人员打标；选中做片时："
-          f"python3 -m toolbox push \"{target}\" --mode video，"
-          "再在服务端跑 remix，应用端 pull 拉回成片。")
+    print("[pipeline] 成片会在云端自动生成（约 20 分钟），完成后打开作品页"
+          "挑选发布即可。")
     return spent

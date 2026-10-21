@@ -25,6 +25,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
@@ -349,7 +350,7 @@ def _tenant_root(cfg, tenant=None):
 
 
 def push(session, mode="eval", dry=False, run_eval=True, no_import=False,
-         tenant=None):
+         tenant=None, on_produce=None):
     """上传会话产物到服务端。mode: eval=评估包（默认）| video=成片包（源片）。
 
     双通道（契约 1.3.0）：config server.upload_url 非空 → 受控 HTTPS 上传
@@ -360,7 +361,10 @@ def push(session, mode="eval", dry=False, run_eval=True, no_import=False,
     的 push 等价 --run-eval（complete run_eval:true），--no-run-eval 显式关；
     成片包（video）恒不触发评估。多租户：rsync 通道 --tenant 覆盖
     server.tenant 配置；HTTPS 通道 tenant 只由 token 决定。
-    """
+    on_produce（REQ-20261021-005）：HTTPS+eval 收口后自动后台轮询成片状态
+    （60s 一次，done/failed/timeout 终态回调一次，传 dict；服务端不支持
+    produce 时回调 {"state": None}）——仅账号模式（usr_* 租户）会真正排队；
+    不传则不轮询（CLI 同步语义不变）。"""
     run_eval = bool(run_eval) and mode == "eval"   # video 恒不评（双通道统一门）
     cfg = load_config()["server"]
     if cfg.get("upload_url"):
@@ -375,7 +379,8 @@ def push(session, mode="eval", dry=False, run_eval=True, no_import=False,
                 raise RuntimeError(
                     "HTTPS 上传未配置 upload_token（账号模式），需先在桌宠"
                     f"界面登录：{e}") from None
-        return _push_https(cfg, session, mode, dry, run_eval, no_import, tenant)
+        return _push_https(cfg, session, mode, dry, run_eval, no_import,
+                           tenant, on_produce=on_produce)
     alias, remote = cfg["ssh_alias"], _tenant_root(cfg, tenant)
     disc = discover_session(session)
 
@@ -509,7 +514,8 @@ def _plan_files(disc, mode, log_dir=None):
         disc, mode, logs=log_names if mode != "video" else None)
 
 
-def _push_https(cfg, session, mode, dry, run_eval, no_import, tenant_override):
+def _push_https(cfg, session, mode, dry, run_eval, no_import, tenant_override,
+                on_produce=None):
     """受控 HTTPS push（契约 C2S-6~9）。tenant 由服务端从 token 解出。"""
     if tenant_override:
         print(f"HTTPS 通道：tenant 由服务端从上传 token 解出，"
@@ -558,6 +564,22 @@ def _push_https(cfg, session, mode, dry, run_eval, no_import, tenant_override):
         raise RuntimeError(
             f"上传完成但 import 未成功（state={state}）；"
             "数据已在服务端，重跑本命令可重试 import")
+    # 成片轮询（REQ-20261021-005）：仅账号模式（usr_* 租户才自动排队）+
+    # eval 模式 + 调用方要回调时；后台线程 60s 一次，终态回调一次。
+    # upload_id 从登记表取（push_files 已落）。
+    if on_produce and mode == "eval" and not cfg.get("upload_token"):
+        from toolbox import uploader as _up
+        upload_id = _up.load_upload_id(
+            disc["session"], mode, _up.files_signature(files))
+        if upload_id:
+            def poll():
+                result = uploader.wait_produce(
+                    upload_id, on_state=lambda s: on_produce(s))
+                on_produce(result)
+            threading.Thread(target=poll, daemon=True,
+                             name="produce-poll").start()
+        else:
+            print("（未取得 upload_id，跳过成片状态轮询）")
 
 
 def _collect_logs(disc, tail_bytes=512 * 1024, logs_dir=None):

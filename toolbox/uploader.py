@@ -22,6 +22,10 @@ SUPPORTED_CONTRACT = (1, 3)
 DEFAULT_CHUNK = 32 * 1024 * 1024        # 32MiB/块（服务端上限 64MiB）
 RETRY_DELAYS = (1, 2, 4, 8, 16)         # 网络/5xx/429 退避；409/422 不走此表
 
+PRODUCE_POLL_S = 60                     # 成片轮询节奏（REQ-20261021-005；
+                                        # 云端渲染约 21min,60s 一次够细）
+PRODUCE_TIMEOUT_S = 60 * 60             # 整体放弃（服务端任务自身 45min 超时）
+
 
 class UploadError(RuntimeError):
     """服务端 4xx/5xx：code 为机器码（契约 §4 错误约定），端侧按 code 分支。
@@ -41,6 +45,18 @@ def file_sha256(path, block=4 * 1024 * 1024):
                 break
             h.update(b)
     return h.hexdigest()
+
+
+def works_full_url(base_url, works_url):
+    """produce.done 的 works_url(相对路径 /eval/<租户>/preview/<slug>)拼
+    上传基址 origin(去掉 /api/production/v1 后缀)成完整可打开 URL
+    (REQ-20261021-005)。绝对 URL 原样返回。"""
+    if not works_url:
+        return ""
+    if works_url.startswith("http://") or works_url.startswith("https://"):
+        return works_url
+    parts = urllib.parse.urlsplit(base_url)
+    return f"{parts.scheme}://{parts.netloc}{works_url}"
 
 
 class ProductionUploader:
@@ -134,6 +150,42 @@ class ProductionUploader:
 
     def status(self, upload_id):
         return self._request_retry("GET", f"/uploads/{upload_id}")
+
+    def wait_produce(self, upload_id, poll_s=PRODUCE_POLL_S,
+                     timeout_s=PRODUCE_TIMEOUT_S, sleep=time.sleep,
+                     on_state=None):
+        """轮询成片(autoremix)状态直到终态（REQ-20261021-005）。
+
+        读既有 C2S-8 状态接口的 `produce` 字段(兼容新增;旧服务端无此键
+        → 立即返回 None,调用方按「服务端不支持」处理)。终态:
+        done → {"state":"done","works_url":…};failed → {"state":"failed",
+        "error":…}。超过 timeout_s 返回 {"state":"timeout"}。中间态经
+        on_state(dict) 回调透传(UI/日志)。网络错误不中断轮询(下一拍重试),
+        连续失败到超时同样返回 timeout。"""
+        deadline = time.time() + timeout_s
+        last = None
+        while True:
+            try:
+                st = self.status(upload_id)
+                produce = st.get("produce")
+                if produce is None:
+                    # queued 前的中间态也是 null:没到终态就继续等
+                    if on_state:
+                        on_state({"state": "waiting"})
+                elif isinstance(produce, dict) and \
+                        produce.get("state") in ("done", "failed"):
+                    if on_state:
+                        on_state(produce)
+                    return produce
+                else:
+                    if produce != last and on_state:
+                        on_state(produce)
+                    last = produce
+            except UploadError:
+                pass                                 # 单拍失败:下一拍重试
+            if time.time() >= deadline:
+                return {"state": "timeout"}
+            sleep(poll_s)
 
     def complete(self, upload_id, manifest, run_eval=False, no_import=False):
         return self._request_retry(

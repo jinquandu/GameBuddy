@@ -904,7 +904,82 @@ class PetWindow(tk.Tk):
                 (LOG.info if ok else LOG.warning)(
                     "后台任务%s：%s%s", "成功" if ok else "失败", session,
                     "" if ok else f"（{log[-200:]}）")
+                if ok:
+                    self._watch_produce(session)   # 成片轮询（REQ-005）
         return n_ok, n_fail
+
+    def _watch_produce(self, session):
+        """每场跑链成功后跟踪云端成片（REQ-20261021-005）：后台线程轮询
+        produce 状态（60s/次，上限 1h），done → flash+托盘+状态行引导打开
+        作品页；failed → 展示原因。仅账号模式（usr_* 自动排队）有意义；
+        内部机/无 upload_id 静默跳过。"""
+        import toolbox.folder_watch as fw
+        from toolbox import uploader as _up
+        from toolbox.config import load_config
+        cfg = (load_config().get("server") or {})
+        if not cfg.get("upload_url") or cfg.get("upload_token"):
+            return                                  # 仅账号模式
+        try:
+            from toolbox.transfer import discover_session
+            disc = discover_session(session)
+            files = []                              # 仅取签名：重算一次清单
+            # 复用 push 登记的最近 upload_id（同 session+eval）
+            reg = {}
+            rp = _up._registry_path()
+            if rp.is_file():
+                reg = json.loads(rp.read_text(encoding="utf-8"))
+            sig = None
+            for (s, m, signature), uid in (reg or {}).items():
+                if s == disc["session"] and m == "eval":
+                    sig = (s, m, signature)
+                    break
+            upload_id = reg.get(sig) if sig else None
+            if not upload_id:
+                return
+        except Exception as e:                      # noqa: BLE001 探测失败跳过
+            LOG.info("成片跟踪跳过（%s 场）：%s", session, e)
+            return
+        api_prod = cfg["upload_url"]
+
+        def poll():
+            up = _up.ProductionUploader(api_prod, token=None)
+            # 账号模式需要签名;用 require_login 的会话
+            try:
+                from toolbox.account import require_login
+                from toolbox import device_identity as di
+                _s = require_login()
+                _b = _s["bearer"]
+                up2 = _up.ProductionUploader(
+                    api_prod, token=_b,
+                    signer=lambda m, w, d: di.sign_request(m, w, d, _b))
+            except Exception as e:                  # noqa: BLE001
+                LOG.info("成片跟踪停止（未登录）：%s", e)
+                return
+
+            def on_state(s):
+                LOG.info("成片状态（%s）：%s", session,
+                         (s or {}).get("state"))
+
+            result = up2.wait_produce(upload_id, on_state=on_state)
+            state = (result or {}).get("state")
+            if state == "done":
+                from toolbox.uploader import works_full_url
+                url = works_full_url(api_prod,
+                                     (result or {}).get("works_url", ""))
+                msg = "成片完成！3 条候选已就绪"
+                LOG.info("%s（%s）", msg, url)
+                self.after(0, lambda: (self._flash(msg + "，点「我的作品」"
+                                                   " →「打开作品页」去挑",
+                                                   C["accent"], sticky=True),
+                                       self._tray_tip("成片完成")))
+            elif state == "failed":
+                err = (result or {}).get("error") or ""
+                LOG.warning("成片生成失败（%s）：%s", session, err[-300:])
+                self.after(0, lambda: self._flash(
+                    "成片生成失败，请重试上传（原始录像不受影响）", C["bad"]))
+
+        threading.Thread(target=poll, daemon=True,
+                         name=f"produce-{session[:12]}").start()
 
     # ---------- 托盘（最小化驻留右下角通知区）
 
