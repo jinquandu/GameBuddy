@@ -272,3 +272,90 @@ def mark_daily_run():
     state = _load()
     state["last_daily"] = datetime.date.today().isoformat()
     _save(state)
+
+
+# ------- 扫描/生产分离：24h 滚动窗口模型（REQ-20260921-001 规则 2-4） -------
+#
+# 规则重述（应用端职责部分）：
+# - 每 2h 扫描（稳定入队，既有 scan；扫描≠生产）；生产窗口=北京时间每日
+#   04:00（daily_hour）；开机时 24h 未生产则立即补跑（条件不豁免）；
+# - 触发阈值：近 24h 新增录像总字节**严格>** threshold_gb（十进制 GB，
+#   默认 2）才启动；「新增」= 稳定文件 mtime 终值落在滚动 24h 窗口内
+#   （正在写入的不算，历史素材 mtime 旧自然排除、不重复计数）；
+# - 滚动 24h 最多一次生产（客户端口径）：窗口内已触发过即不再触发；
+#   服务端 production_groups 窗口去重为最终权威（409 window_conflict）。
+# 规则 5「无新录像不生产、当日权益照算」：阈值不足=生产时刻照常消耗。
+
+PRODUCTION_WINDOW_S = 86400          # 滚动生产窗口（与服务端建组窗口同口径）
+
+
+def threshold_bytes(cfg=None):
+    """触发阈值字节数（十进制 GB；REQ 默认值口径）。"""
+    cfg = cfg if cfg is not None else _cfg()
+    return float(cfg.get("threshold_gb", 2)) * 1e9
+
+
+def new_recordings_bytes(watch_dir, window_s=PRODUCTION_WINDOW_S,
+                         now=None, cfg=None):
+    """近 window_s 新增录像总字节：仅稳定目标内、mtime 终值在窗口内的
+    视频文件（完成写入时刻口径；正在写入/历史素材不计）。"""
+    wd = Path(watch_dir)
+    if not wd.is_dir():
+        return 0
+    cfg = cfg if cfg is not None else _cfg()
+    stable_sec = int(cfg.get("stable_min", 10)) * 60
+    now = now if now is not None else time.time()
+    cutoff = now - window_s
+    total = 0
+    for entry in sorted(wd.iterdir()):
+        if entry.is_dir():
+            if not _stable(entry, stable_sec, now=now):
+                continue                       # 组内有文件仍在写 → 整组未完成
+            vids = _videos_in(entry)
+        elif entry.suffix.lower() in VIDEO_EXTS:
+            if not _stable(entry, stable_sec, now=now):
+                continue
+            vids = [entry]
+        else:
+            continue
+        for v in vids:
+            try:
+                st = v.stat()
+            except OSError:
+                continue
+            if cutoff < st.st_mtime <= now:
+                total += st.st_size
+    return total
+
+
+def production_due(daily_hour=4, boot=False, cfg=None, state=None,
+                   now=None):
+    """生产是否到期：开机补跑（boot，无小时门）或 ≥daily_hour，且滚动
+    24h 窗口内未生产过。返回 (due: bool, why: str)——why 供日志留痕。"""
+    cfg = cfg if cfg is not None else _cfg()
+    state = state if state is not None else _load()
+    now = now if now is not None else time.time()
+    daily_hour = int(cfg.get("daily_hour", daily_hour))
+    window_s = int(cfg.get("production_window_s", PRODUCTION_WINDOW_S))
+    last = float(state.get("last_production_ts") or 0)
+    if last and now - last < window_s:
+        return False, f"滚动窗口内已生产（{int(now - last) // 3600}h 前）"
+    if boot:
+        return True, "开机补跑（24h 未生产）"
+    import datetime
+    if datetime.datetime.fromtimestamp(now).hour >= daily_hour:
+        return True, f"到达生产时刻（≥{daily_hour:02d}:00）"
+    return False, f"未到生产时刻（<{daily_hour:02d}:00）"
+
+
+def mark_production_run(state=None, now=None):
+    """记录一次生产触发（无论阈值是否满足——生产时刻照常消耗；绑定门
+    未过等「暂缓」不记，由 pet 侧负责区分）。"""
+    state = state if state is not None else _load()
+    state["last_production_ts"] = now if now is not None else time.time()
+    _save(state)
+
+
+def last_production_ts(state=None):
+    state = state if state is not None else _load()
+    return float(state.get("last_production_ts") or 0)

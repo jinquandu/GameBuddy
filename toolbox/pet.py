@@ -510,12 +510,16 @@ class PetWindow(tk.Tk):
             self._flash("绑定流程异常，请稍后再试", C["warn"])
         self._prereq_refresh()
 
-    # ---------- 目录监控（后台日任务，REQ-20261019-013）
+    # ---------- 目录监控（后台日任务，REQ-20261019-013；
+    #             扫描/生产分离 REQ-20261021-001 规则 2-4）
     #
-    # UI 监控行已移除；pet 常驻进程内每日跑一轮「扫描入队→顺序跑完队列」，
-    # 目录取 config folder_watch.watch_dir（历史 watch_dir 兜底迁移），
-    # 无目录则任务不启动。错过当天时刻（daily_hour，默认 4 点）启动即补跑；
-    # 当日已跑标记持久化在 .folder_watch.json（last_daily），一天恰好一轮。
+    # 每 scan_interval_min（默认 120 分钟）扫描稳定入队（扫描≠生产）；
+    # 生产触发 = 每日 daily_hour（默认 04:00）或开机补跑（24h 未生产即查，
+    # 条件不豁免），滚动 24h 窗口内只触发一次（last_production_ts 持久化
+    # 于 .folder_watch.json；服务端建组窗口 409 为最终权威）。触发门槛 =
+    # 近 24h 新增录像严格 > threshold_gb（默认 2，十进制 GB，mtime 终值
+    # 口径）；不足阈值不生产、当日权益照算（规则 5）。绑定门（方案A L1）
+    # 未过 = 暂缓不记窗口，绑定完成后窗口内重试。
 
     def _daily_start(self):
         if self.daily_thread and self.daily_thread.is_alive():
@@ -526,8 +530,6 @@ class PetWindow(tk.Tk):
         self.daily_thread.start()
 
     def _daily_loop(self):
-        import datetime
-
         import toolbox.folder_watch as fw
         from toolbox.config import load_config
         cfg = load_config().get("folder_watch") or {}
@@ -536,35 +538,58 @@ class PetWindow(tk.Tk):
             LOG.info("后台日任务未配置目录（folder_watch.watch_dir），不启动")
             return
         hour = int(cfg.get("daily_hour", 4))
-        LOG.info("后台日任务就绪：%s（每日 %02d:00 一轮，错过启动补跑）",
-                 wdir, hour)
+        scan_min = int(cfg.get("scan_interval_min", 120))
+        LOG.info("后台日任务就绪：%s（每 %d 分钟扫描入队；生产=每日 %02d:00 "
+                 "或开机补跑，滚动 24h 一次，近 24h 新增>%.0fGB 触发）",
+                 wdir, scan_min, hour, float(cfg.get("threshold_gb", 2)))
+        boot = {"done": False}      # 开机补跑时刻只查一次（规则 4）
+        next_scan = 0.0             # 首 tick 即扫（开机补扫停机期间稳定的）
         while not self.daily_stop.is_set():
-            now = datetime.datetime.now()
-            ran_today = fw.last_daily_run() == now.date().isoformat()
-            if not ran_today and now.hour >= hour:
-                # L1 预检（方案A §2）：明确未绑定 → 暂缓本轮不发请求；
-                # 不标 ran_today，绑定完成后 10 分钟内自动补跑。
-                why = self._bind_gate()
-                if why:
-                    LOG.warning("后台日任务暂缓：%s", why)
-                    self.after(0, lambda w=why: self._flash(
-                        f"生产前置未满足：{w}", C["warn"]))
+            # ① 扫描节拍（每 2h，稳定入队；扫描≠生产——规则 2）
+            if time.time() >= next_scan:
+                try:
+                    new = fw.scan(wdir)
+                    if new:
+                        LOG.info("扫描入队：%d 个新目标", new)
+                except Exception as e:          # noqa: BLE001 扫描失败不杀线程
+                    LOG.warning("扫描失败：%s", e)
+                next_scan = time.time() + scan_min * 60
+            # ② 生产判定（滚动 24h 窗口 + 阈值严格 >，规则 3/4/5）
+            due, why = fw.production_due(hour, boot=not boot["done"])
+            if due:
+                boot["done"] = True
+                # L1 预检（方案A §2）：明确未绑定 → 暂缓不记生产窗口，
+                # 绑定完成后窗口内自动重试（10 分钟粒度）
+                gate = self._bind_gate()
+                if gate:
+                    LOG.warning("生产暂缓：%s", gate)
+                    self.after(0, lambda g=gate: self._flash(
+                        f"生产前置未满足：{gate}", C["warn"]))
                 else:
-                    LOG.info("后台日任务开始：%s", wdir)
-                    try:
-                        n_ok, n_fail = self._daily_pass(wdir)
-                        LOG.info("后台日任务完成：成功 %d / 失败 %d",
-                                 n_ok, n_fail)
-                        if n_ok or n_fail:
-                            self.after(0, lambda ok=n_ok, fl=n_fail:
-                                       self._flash(
-                                           f"后台处理完成：成{ok} 败{fl}"
-                                           "（详见 pet.log）",
-                                           C["warn"] if fl else C["dim"]))
-                    except Exception as e:      # noqa: BLE001 单日失败不杀线程
-                        LOG.warning("后台日任务失败：%s", e)
-                    fw.mark_daily_run()
-            self.daily_stop.wait(timeout=600)   # 10 分钟粒度检查当日是否到期
+                    added = fw.new_recordings_bytes(wdir)
+                    limit = fw.threshold_bytes()
+                    if added > limit:           # 严格 >（等于/低于不启动）
+                        LOG.info("生产开始（%s）：近 24h 新增 %.2fGB > "
+                                 "%.0fGB", why, added / 1e9, limit / 1e9)
+                        try:
+                            n_ok, n_fail = self._daily_pass(wdir)
+                            LOG.info("生产完成：成功 %d / 失败 %d",
+                                     n_ok, n_fail)
+                            if n_ok or n_fail:
+                                self.after(0, lambda ok=n_ok, fl=n_fail:
+                                           self._flash(
+                                               f"后台处理完成：成{ok} 败{fl}"
+                                               "（详见 pet.log）",
+                                               C["warn"] if fl else C["dim"]))
+                        except Exception as e:  # noqa: BLE001 单轮失败不杀线程
+                            LOG.warning("生产失败：%s", e)
+                    else:
+                        # 规则 5：无新录像/不足阈值不生产，当日权益照算
+                        LOG.info("生产跳过（%s）：近 24h 新增 %.2fGB ≤ "
+                                 "%.0fGB，当日权益照算", why, added / 1e9,
+                                 limit / 1e9)
+                    fw.mark_production_run()   # 生产时刻消耗（含跳过）
+            self.daily_stop.wait(timeout=600)   # 10 分钟粒度复查窗口/绑定门
 
     def _bind_gate(self):
         """L1 绑定预检：仅当「明确未绑定」（wechat-binding 返回 none）拦下；
