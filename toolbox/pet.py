@@ -1,33 +1,31 @@
-"""桌面宠物客户端（素朴版 v2）：极简小窗 + 系统托盘驻留。
+"""陪玩大师姐 PC 主窗（UI 对齐 REQ-20261021-003 范围2，2026-10-21）。
 
-python -m toolbox pet [--address <BV号/URL/场次目录>]
+基线 = 15 页 UI V1 评审稿（cut_kb 交接/20261019-pc-ui-review）+ 全流程
+Demo（用户拍板「UI 以全流程 Demo 为准」）；IDEA-006 新规则（微信前置、
+扫描静默、三选一）按 REQ-20261021-001 定稿实现。信息架构 = 稿的
+「工作台 / 我的作品 / 账号设置」左侧导航 + 白卡片；按用户 UI 偏好取
+稿的配色语言（紫/粉）、不采立绘头像装饰。
 
-v2（2026-10-12 按用户反馈改素朴）：
-- 主界面只留两样：录像地址（历史下拉 + 浏览）、「开始跑链」主按钮，
-  外加一行状态文字（跑链进展/完成/出错提示——无时间线后的唯一反馈）。
-- 标准窗口（系统标题栏），最小化即藏进右下角系统托盘（任务栏不占位），
-  托盘菜单/双击图标恢复；依赖 pystray（未装则最小化退化为普通任务栏）。
-- 桌面录制入口移除（CLI：python -m toolbox screenrec）；租户 ID 只在
-  config.yaml 维护；✂自动剪辑/↻续跑等按钮能力并入主按钮状态机/CLI。
+前台无手动跑链 / BV / URL / 监控行（稿已确认边界）：生产由后台日任务
+按规则驱动（每 2h 扫描入队 + 04:00/开机补跑触发 + 近 24h 新增>2GB，
+滚动 24h 一组）；内部联调走 CLI `toolbox pipeline`。三选一在作品页
+（通知服务 portal）完成，PC 端只做真实状态 + 入口（不以稿代验：
+候选列表/发布接口契约后置 C2S-15 起另行起草）。
 
-状态机：idle 待命 / run 跑链（n/9 + 当前阶段）/ done 完成 / err 出错
-（主按钮变「↻ 续跑」，跳过已完成阶段）/ stop 手动停止。
-
-调试：设 PET_SNAPSHOT=<目录> 启动后自动对各状态截图存 PNG（UI 回归用）。
+ProgressParser/STAGES 保留：CLI 跑链输出解析（progress_regress/
+watch_pipeline_log 消费），主窗不再驱动手动跑链。
 """
 import json
 import os
-import queue
 import re
-import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from toolbox import proc
 from toolbox.config import DATA, ROOT, load_config
 from toolbox.logs import get as _get_log
 
@@ -47,14 +45,18 @@ STAGES = [  # (阶段名, 显示名) —— 与 pipeline.run_pipeline 的 stage 
 STAGE_WEIGHT = {"download": .02, "asr": .03, "speaker": .01, "detect": .75,
                 "knockdowns": .10, "pickups": .06, "queues": .01,
                 "voice": .01, "push": .01}
-STATE_COLOR = {"idle": "dim", "run": "accent", "done": "good",
-               "err": "bad", "stop": "warn"}
 
-C = {"bg": "#FFFEFC", "fg": "#3A3238", "dim": "#8C7F88", "accent": "#E8663C",
-     "good": "#4CA37E", "warn": "#D99A3C", "bad": "#D9534F"}
+C = {"bg": "#FFFFFF", "fg": "#3A3238", "dim": "#8C7F88",
+     "accent": "#7C5CE0", "good": "#4CA37E", "warn": "#D99A3C",
+     "bad": "#D9534F"}
+# 品牌配色语言（UI V1 评审稿）：页面浅紫灰底、白卡片、主紫/深紫/粉 CTA
+BRAND = {"page": "#F2F1F6", "card": "#FFFFFF", "side": "#FFFFFF",
+         "primary": "#7C5CE0", "deep": "#3B2A5E", "cta": "#F4517B",
+         "lav": "#EFE9FB", "line": "#E7E4F0"}
 FONT = "Microsoft YaHei UI"
-W = 360                        # 小窗宽
+W = 660                        # 主窗宽（左导航 136 + 内容区）
 HIST = DATA / "pet" / "history.json"
+NAV = (("home", "工作台"), ("works", "我的作品"), ("settings", "账号设置"))
 
 
 def _or_dash(v):
@@ -161,7 +163,7 @@ class ProgressParser:
         mm = self._RE_KD_SHARD.match(s)
         if mm:
             pre = mm.group(1)
-            for k in self.dur_by_prefix:
+            for k, d in self.dur_by_prefix.items():
                 if pre.startswith(k):
                     self.kd_seen.add(k)
                     break
@@ -277,145 +279,233 @@ def latest_stats():
     return out
 
 
-# ---------------------------------------------------------------- 素朴小窗
+# ---------------------------------------------------------------- 主窗
 
 class PetWindow(tk.Tk):
     def __init__(self, address=""):
         super().__init__()
-        self.title("陪玩大师姐 · 跑链")
+        self.title("陪玩大师姐")
         self.resizable(False, False)
-        self.configure(bg=C["bg"])
+        self.configure(bg=BRAND["page"])
+        if address:
+            LOG.info("pet --address 已忽略：前台无 BV/URL 入口（UI V1 评审稿）")
 
-        self.proc = None
-        self.q = queue.Queue()
-        self.parser = ProgressParser()
-        self.state = "idle"          # idle/run/done/err/stop
-        self.tray = None             # pystray.Icon（首次最小化时创建）
-        self._logs = []              # 尾部日志（排障）
-        self._status_text = ""
-        self._status_sticky = False
-        self._retry_skip = None       # 出错后续跑要跳过的已完成阶段
-        self._last_addr = ""
-        self._snap_queue = []
         hist = self._load_hist()
-        # run_eval 无 UI 勾选框（历史遗留变量，UI 已不可改）：REQ-20261021-002
-        # 评估链默认开启，恒 True；旧 hist 里残留的 false 不再生效（用户无入口
-        # 设置过它，一直是旧默认值），显式关闭走 --no-run-eval 旗标
-        self.run_eval_var = tk.BooleanVar(value=True)
-        self.watch_dir = hist.get("watch_dir", "")   # 后台日任务的目录兜底
-        # 断链续跑（跨重启）：上次出错的场次+已完成阶段，启动即亮「↻ 续跑」
-        self._retry_saved = {}
-        r = hist.get("retry") or {}
-        if r.get("addr") and r.get("skip") and Path(r["addr"]).exists():
-            self._retry_saved = r
-            self._retry_skip = list(r["skip"])
-            self._last_addr = r["addr"]
+        self.watch_dir = hist.get("watch_dir", "")   # 后台日任务目录兜底
+        self.tray = None             # pystray.Icon（首次最小化时创建）
         self.daily_stop = threading.Event()
         self.daily_thread = None
+        self._status_text = ""
+        self._status_sticky = False
+        self._page = "home"
+        self._pre = {}          # prerequisites() 最近快照（主线程渲染用）
+        self._prod = {}         # 生产状态快照（summary/窗口/新增字节）
 
         self._build()
-        if self._retry_saved:
-            self.btn.config(text="↻  续跑")
-        if address:
-            self.addr_var.set(address)
-        elif hist["addresses"]:
-            self.addr_var.set(hist["addresses"][0])
-
+        self.geometry(f"{W}x600")
         self._place_bottom_right()
         self.bind("<Unmap>", self._on_unmap)   # 最小化 → 托盘
         self._acct_refresh()
+        self._prod_refresh()
         self._daily_start()
-        # 点 X 必须走 _on_close：Tk 默认销毁会绕过杀链/存历史/退托盘，
-        # 跑链子进程成孤儿继续烧 CPU
+        # 点 X 必须走 _on_close：绕过会跳过杀日任务子进程/存历史/退托盘
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(120, self._poll)
         self.after(2500, self._dev_snapshot)
 
-    # ---------- 布局
+    # ---------- 布局（左导航 + 三页卡片；素朴紧凑，配色=评审稿语言）
+
+    def _card(self, parent, title):
+        """白卡片：标题行 + 内容区。返回内容 Frame。"""
+        card = tk.Frame(parent, bg=BRAND["card"], highlightbackground=
+                        BRAND["line"], highlightthickness=1)
+        card.pack(fill="x", padx=16, pady=(0, 10))
+        tk.Label(card, text=title, bg=BRAND["card"], fg=BRAND["deep"],
+                 font=(FONT, 10, "bold"), anchor="w").pack(
+            fill="x", padx=12, pady=(10, 4))
+        body = tk.Frame(card, bg=BRAND["card"])
+        body.pack(fill="x", padx=12, pady=(0, 10))
+        return body
 
     def _build(self):
-        f = ttk.Frame(self, padding=(12, 10))
-        f.pack(fill="both", expand=True)
-        # 录像目录=唯一选择入口（IDEA-003/REQ-20261021-001：仅本地目录，
-        # 去 BV/URL——内部联调走 CLI toolbox pipeline；选择即监控目录）
-        ttk.Label(f, text="录像目录（本地文件夹，后台自动扫描）").pack(anchor="w")
-        row = ttk.Frame(f)
-        row.pack(fill="x", pady=(2, 8))
-        self.addr_var = tk.StringVar()
-        self.addr_ent = ttk.Entry(row, textvariable=self.addr_var)
-        self.addr_ent.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="选择…", width=7,
-                   command=self._browse).pack(side="left", padx=(6, 0))
-        self.btn = ttk.Button(f, text="▶  开始跑链",
-                              command=self._on_main_button)
-        self.btn.pack(fill="x", ipady=5, pady=(0, 6))
-        # 进度条（按时长加权 + 剩余时间外推，仅 run 态显示）
-        self.pbar = ttk.Progressbar(f, mode="determinate", maximum=100)
-        self.plab = tk.Label(f, text="", bg=C["bg"], fg=C["dim"],
-                             font=(FONT, 9), anchor="w")
-        # 账号行（契约 §4A；服务未就绪时登录窗如实提示，不降级不绕过）
-        # + 三前置看板（REQ-20261021-001 规则1/方案A L1：登录∧权益∧微信，
-        #   缺项引导绑定；权威判断在 C2S-12 服务端，此处只管体验）
-        acctbox = ttk.Frame(f)
-        acctbox.pack(fill="x", pady=(0, 2))
-        acct = ttk.Frame(acctbox)
-        acct.pack(fill="x")
-        self.acct_lab = tk.Label(acct, text="账号：未登录", bg=C["bg"],
-                                 fg=C["dim"], font=(FONT, 9), anchor="w")
-        self.acct_lab.pack(side="left", fill="x", expand=True)
-        self.acct_btn = ttk.Button(acct, text="登录", width=7,
+        side = tk.Frame(self, bg=BRAND["side"], width=136)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        tk.Label(side, text="陪玩大师姐", bg=BRAND["side"], fg=BRAND["deep"],
+                 font=(FONT, 11, "bold")).pack(anchor="w", padx=14,
+                                               pady=(14, 0))
+        tk.Label(side, text="你打游戏 我剪高光", bg=BRAND["side"],
+                 fg=C["dim"], font=(FONT, 8)).pack(anchor="w", padx=14)
+        self._nav_btns = {}
+        for key, txt in NAV:
+            b = tk.Label(side, text=f" {txt}", anchor="w", cursor="hand2",
+                         bg=BRAND["side"], fg=BRAND["deep"],
+                         font=(FONT, 10), padx=10, pady=7)
+            b.pack(fill="x", padx=8, pady=(10 if key == "home" else 2))
+            b.bind("<Button-1>", lambda e, k=key: self._nav(k))
+            self._nav_btns[key] = b
+        # 侧栏底部：权益小卡（深紫）+ 账号行
+        foot = tk.Frame(side, bg=BRAND["side"])
+        foot.pack(side="bottom", fill="x", padx=8, pady=8)
+        self.side_member = tk.Label(
+            foot, text="权益 ·", bg=BRAND["deep"], fg="#FFFFFF",
+            font=(FONT, 9), anchor="w", padx=8, pady=6, wraplength=104,
+            justify="left")
+        self.side_member.pack(fill="x")
+        self.side_acct = tk.Label(foot, text="未登录", bg=BRAND["side"],
+                                  fg=C["dim"], font=(FONT, 8), anchor="w")
+        self.side_acct.pack(anchor="w", pady=(4, 0))
+
+        body = tk.Frame(self, bg=BRAND["page"])
+        body.pack(side="right", fill="both", expand=True)
+        pages = tk.Frame(body, bg=BRAND["page"])
+        pages.pack(fill="both", expand=True)
+        self._pages = {}
+        for key, _ in NAV:
+            self._pages[key] = tk.Frame(pages, bg=BRAND["page"])
+
+        # ---- 工作台：文件夹源 / 今日生产 / 后台队列
+        home = self._pages["home"]
+        b1 = self._card(home, "录像文件夹")
+        self.dir_lab = tk.Label(b1, text="未选择", bg=BRAND["card"],
+                                fg=C["fg"], font=(FONT, 10), anchor="w",
+                                wraplength=360, justify="left")
+        self.dir_lab.pack(side="left", fill="x", expand=True)
+        ttk.Button(b1, text="更换文件夹", width=11,
+                   command=self._browse).pack(side="right")
+        tk.Label(home, text="每 2 小时自动扫描新增录像，稳定后入队待产（扫描≠生产）",
+                 bg=BRAND["page"], fg=C["dim"], font=(FONT, 8),
+                 anchor="w").pack(fill="x", padx=18)
+
+        b2 = self._card(home, "今日生产")
+        head2 = tk.Frame(b2, bg=BRAND["card"])
+        head2.pack(fill="x")
+        self.prod_badge = tk.Label(head2, text="…", bg=BRAND["lav"],
+                                   fg=BRAND["primary"], font=(FONT, 9),
+                                   padx=8, pady=2)
+        self.prod_badge.pack(side="left")
+        self.prod_act = ttk.Button(head2, text="", width=9)
+        self.prod_act.pack(side="right")
+        self.prod_detail = tk.Label(b2, text="", bg=BRAND["card"], fg=C["dim"],
+                                    font=(FONT, 9), anchor="w", wraplength=440,
+                                    justify="left")
+        self.prod_detail.pack(fill="x", pady=(6, 0))
+
+        b3 = self._card(home, "后台队列")
+        self.queue_lab = tk.Label(b3, text="…", bg=BRAND["card"], fg=C["fg"],
+                                  font=(FONT, 9), anchor="w",
+                                  wraplength=350, justify="left")
+        self.queue_lab.pack(side="left", fill="x", expand=True)
+        ttk.Button(b3, text="刷新", width=6,
+                   command=self._all_refresh).pack(side="right")
+
+        # ---- 我的作品：三选一说明 + 真实状态 + 作品页入口
+        works = self._pages["works"]
+        w1 = self._card(works, "每日三选一")
+        self.works_lab = tk.Label(w1, text="…", bg=BRAND["card"], fg=C["fg"],
+                                  font=(FONT, 9), anchor="w", wraplength=440,
+                                  justify="left")
+        self.works_lab.pack(side="left", fill="x", expand=True)
+        ttk.Button(w1, text="打开作品页", width=11,
+                   command=self._open_portal).pack(side="right")
+        tk.Label(works, text="每日 3 条候选只选 1 条，确认即锁定不可改选；"
+                             "三选一与发布入口在作品页完成，发布最终由你在抖音确认",
+                 bg=BRAND["page"], fg=C["dim"], font=(FONT, 8), anchor="w",
+                 wraplength=420, justify="left").pack(fill="x", padx=18)
+
+        # ---- 账号设置：账号 / 生产前置 / 微信与通知 / 电脑与录像
+        st = self._pages["settings"]
+        s1 = self._card(st, "账号")
+        self.set_acct_lab = tk.Label(s1, text="未登录", bg=BRAND["card"],
+                                     fg=C["fg"], font=(FONT, 10), anchor="w")
+        self.set_acct_lab.pack(side="left", fill="x", expand=True)
+        self.acct_btn = ttk.Button(s1, text="登录", width=7,
                                    command=self._acct_click)
         self.acct_btn.pack(side="right")
-        self.pre_row = ttk.Frame(acctbox)   # 未登录/内部机不占行（render 控制）
+
+        s2 = self._card(st, "生产前置（缺项不生产）")
+        pre_row = tk.Frame(s2, bg=BRAND["card"])
+        pre_row.pack(fill="x")
         self.pre_labs = {}
         for key, txt in (("login", "登录"), ("member", "权益"),
                          ("bind", "微信")):
-            lab = tk.Label(self.pre_row, text=txt, bg=C["bg"], fg=C["dim"],
+            lab = tk.Label(pre_row, text=txt, bg=BRAND["card"], fg=C["dim"],
                            font=(FONT, 9))
-            lab.pack(side="left", padx=(0, 10))
+            lab.pack(side="left", padx=(0, 12))
             self.pre_labs[key] = lab
-        tk.Label(self.pre_row, text="生产前置", bg=C["bg"], fg=C["dim"],
-                 font=(FONT, 8)).pack(side="right")
-        self.bind_btn = ttk.Button(self.pre_row, text="去绑定", width=7,
+        self.bind_btn = ttk.Button(pre_row, text="去绑定", width=7,
                                    command=self._bind_click)
-        self.bind_btn.pack(side="right", padx=(0, 6))
-        # 目录监控已退后台日任务（REQ-20261019-013）：不再有监控行，
-        # 目录经 config folder_watch.watch_dir 配置，每日一轮自动跑链
-        self.status_lab = tk.Label(f, text="", bg=C["bg"], fg=C["dim"],
-                                   font=(FONT, 9), anchor="w", wraplength=W - 48,
-                                   justify="left")
-        self.status_lab.pack(fill="x")
+        self.bind_btn.pack(side="right")
+
+        s3 = self._card(st, "微信与通知")
+        self.set_bind_lab = tk.Label(s3, text="微信：未知", bg=BRAND["card"],
+                                     fg=C["fg"], font=(FONT, 9), anchor="w")
+        self.set_bind_lab.pack(side="left", fill="x", expand=True)
+        self.opt_in_var = tk.BooleanVar(value=False)
+        self._opt_busy = {"on": False}     # 程序置值不回发 consent
+        self.opt_in_chk = ttk.Checkbutton(
+            s3, text="成片通知", variable=self.opt_in_var,
+            command=self._on_opt_in)
+        self.opt_in_chk.pack(side="right")
+        tk.Label(st, text="更换收片微信请联系大师姐；通知开关与绑定相互独立"
+                          "（关通知≠解绑）",
+                 bg=BRAND["page"], fg=C["dim"], font=(FONT, 8), anchor="w",
+                 wraplength=420, justify="left").pack(fill="x", padx=18)
+
+        s4 = self._card(st, "电脑与录像")
+        from toolbox import device_identity as _di
+        tk.Label(s4, text=f"本机设备 {_di.device_code()[:15]}…（一机一号，"
+                          "换电脑需短信重新验证）",
+                 bg=BRAND["card"], fg=C["fg"], font=(FONT, 9), anchor="w",
+                 wraplength=440, justify="left").pack(fill="x")
+        row4 = tk.Frame(s4, bg=BRAND["card"])
+        row4.pack(fill="x", pady=(6, 0))
+        self.set_dir_lab = tk.Label(row4, text="录像目录：未选择",
+                                    bg=BRAND["card"], fg=C["fg"],
+                                    font=(FONT, 9), anchor="w",
+                                    wraplength=350, justify="left")
+        self.set_dir_lab.pack(side="left", fill="x", expand=True)
+        ttk.Button(row4, text="更换文件夹", width=11,
+                   command=self._browse).pack(side="right")
+
+        # ---- 常驻状态行（短闪提示；出错 sticky）
+        self.status_lab = tk.Label(body, text="", bg=BRAND["page"],
+                                   fg=C["dim"], font=(FONT, 9), anchor="w",
+                                   wraplength=W - 180, justify="left")
+        self.status_lab.pack(fill="x", padx=18, pady=(0, 8))
+        self._nav("home")
+
+    def _nav(self, page):
+        self._page = page
+        for key, _ in NAV:
+            btn = self._nav_btns[key]
+            sel = key == page
+            btn.config(bg=BRAND["lav"] if sel else BRAND["side"],
+                       fg=BRAND["primary"] if sel else BRAND["deep"])
+            self._pages[key].pack_forget()
+        self._pages[page].pack(fill="both", expand=True)
 
     def _place_bottom_right(self):
         """首显落在屏幕右下（托盘附近），不打扰主工作区。"""
         self.update_idletasks()
         w, h = self.winfo_width(), self.winfo_height()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"+{sw - w - 28}+{sh - h - 88}")
+        x = self.winfo_screenwidth() - w - 36
+        y = self.winfo_screenheight() - h - 72
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
-    # ---------- 历史
+    # ---------- 历史（目录持久化在 config，hist 只留兜底）
 
     def _load_hist(self):
         try:
             d = json.loads(HIST.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             d = {}
-        return {"addresses": d.get("addresses", []),
-                "run_eval": bool(d.get("run_eval", False)),
-                "watch_dir": d.get("watch_dir", ""),
-                "retry": d.get("retry") or {}}   # 断链续跑：跨重启一键续
+        return {"watch_dir": d.get("watch_dir", "")}
 
     def _save_hist(self):
         HIST.parent.mkdir(parents=True, exist_ok=True)
-        addr = self.addr_var.get().strip()
-        addrs = [a for a in self._load_hist()["addresses"] if a != addr]
-        if addr:
-            addrs.insert(0, addr)
-        HIST.write_text(json.dumps(
-            {"addresses": addrs[:8], "run_eval": bool(self.run_eval_var.get()),
-             "watch_dir": self.watch_dir,
-             "retry": getattr(self, "_retry_saved", None) or {}},
-            ensure_ascii=False, indent=1), encoding="utf-8")
+        HIST.write_text(json.dumps({"watch_dir": self.watch_dir},
+                                   ensure_ascii=False, indent=1),
+                        encoding="utf-8")
 
     # ---------- 账号（契约 §4A，C2S-10/11）
 
@@ -429,6 +519,9 @@ class PetWindow(tk.Tk):
         api, prod = self._acct_cfg()
         sess = AccountClient(api, prod).session_summary()
         if sess:
+            if not messagebox.askokcancel("退出登录",
+                                          "退出后当日生产会暂缓，确定退出？"):
+                return
             AccountClient(api, prod).logout()
             self._acct_refresh()
             self._flash("已退出账号", C["dim"])
@@ -444,29 +537,31 @@ class PetWindow(tk.Tk):
         api, prod = self._acct_cfg()
         try:
             sess = AccountClient(api, prod).session_summary()
-        except Exception:                      # noqa: BLE001 状态行永不杀窗
+        except Exception:                      # noqa: BLE001 状态永不杀窗
             sess = {}
         if sess:
-            self.acct_lab.config(
-                text=f"账号：{sess.get('user_id', '?')}（{sess.get('phone', '')}）",
+            self.set_acct_lab.config(
+                text=f"{sess.get('user_id', '?')}（{sess.get('phone', '')}）",
                 fg=C["fg"])
             self.acct_btn.config(text="退出")
+            self.side_acct.config(text=str(sess.get('user_id', '?'))[:16],
+                                  fg=C["fg"])
         else:
-            self.acct_lab.config(text="账号：未登录", fg=C["dim"])
+            self.set_acct_lab.config(text="未登录", fg=C["dim"])
             self.acct_btn.config(text="登录")
+            self.side_acct.config(text="未登录", fg=C["dim"])
+        self._render_dir()
         self._prereq_refresh()
 
-    # ---------- 三前置看板（REQ-20261021-001 规则1/方案A L1 体验层）
-    #
-    # 登录（本地会话可判）/权益/微信（服务端字段，缺失=未知「·」不臆断）。
-    # 「去绑定」仅在明确未绑定时出现；绑定完成后自动补跑当日生产
-    # （daily 未标记 ran_today，10 分钟粒度重检）。权威在 C2S-12 服务端。
+    # ---------- 三前置（REQ-20261021-001 规则1/方案A L1 体验层）
 
     def _prereq_refresh(self):
         """后台取数 → 主线程渲染；任何失败只收敛为「未知」，不杀窗。"""
         from toolbox.account import AccountClient
         api, prod = self._acct_cfg()
         if not api:
+            self._pre = {}
+            self.after(0, self._render_pre)
             return
 
         def run():
@@ -475,31 +570,80 @@ class PetWindow(tk.Tk):
                 pre = AccountClient(api, prod).prerequisites()
             except Exception:                  # noqa: BLE001
                 pre = None
-            self.after(0, lambda p=pre: self._prereq_render(p or {}))
+            self.after(0, lambda p=pre: self._render_pre(p or {}))
         threading.Thread(target=run, daemon=True).start()
 
-    def _prereq_render(self, pre):
+    def _render_pre(self, pre=None):
+        if pre is not None:
+            self._pre = pre
+        pre = self._pre
         mark = {True: ("✓", "good"), False: ("✗", "bad"),
                 None: ("·", "dim")}
-        api, _ = self._acct_cfg()
-        if not api or not pre.get("logged_in"):
-            self.pre_row.pack_forget()
-            return
         binding = pre.get("binding")
-        cells = (("login", pre.get("logged_in")),
-                 ("member", pre.get("member")),
-                 ("bind", {"bound": True, "none": False}.get(binding)))
-        for key, val in cells:
+        for key, val in (("login", pre.get("logged_in")),
+                         ("member", pre.get("member")),
+                         ("bind", {"bound": True, "none": False}.get(binding))):
             glyph, color = mark[val]
             name = {"login": "登录", "member": "权益", "bind": "微信"}[key]
-            self.pre_labs[key].config(
-                text=f"{name}{glyph}", fg=C[color])
+            self.pre_labs[key].config(text=f"{name}{glyph}", fg=C[color])
         if binding == "none":                  # 仅明确未绑定才给入口
-            self.bind_btn.pack(side="right", padx=(0, 6))
+            self.bind_btn.pack(side="right")
         else:
             self.bind_btn.pack_forget()
-        if not self.pre_row.winfo_ismapped():
-            self.pre_row.pack(fill="x", pady=(2, 0))
+        if binding == "bound":
+            self.set_bind_lab.config(text="微信：已绑定", fg=C["good"])
+        elif binding == "none":
+            self.set_bind_lab.config(text="微信：未绑定", fg=C["bad"])
+        else:
+            self.set_bind_lab.config(text="微信：未知（服务未返回）",
+                                     fg=C["dim"])
+        # 侧栏权益卡
+        m = pre.get("member")
+        if m is True:
+            exp = pre.get("member_expires")
+            if exp:
+                until = time.strftime("%m-%d", time.localtime(exp))
+                self.side_member.config(text="权益 ✓\n至 " + until)
+            else:
+                self.side_member.config(text="权益 ✓")
+        elif m is False:
+            self.side_member.config(text="权益 未开通\n后台开通后生效")
+        else:
+            self.side_member.config(text="权益 ·")
+        # 通知开关（程序置值不回发）
+        opt = pre.get("opt_in")
+        self._opt_busy["on"] = True
+        try:
+            self.opt_in_var.set(bool(opt))
+            self.opt_in_chk.config(state="normal" if opt is not None
+                                   and binding == "bound" else "disabled")
+        finally:
+            self._opt_busy["on"] = False
+        self._render_prod()
+
+    def _on_opt_in(self):
+        if self._opt_busy["on"]:
+            return
+        api, prod = self._acct_cfg()
+        val = self.opt_in_var.get()
+
+        def run():
+            from toolbox.account import AccountClient, AccountError
+            try:
+                AccountClient(api, prod).notification_consent(val)
+                self.after(0, lambda: self._flash(
+                    "成片通知已开启" if val else "成片通知已关闭（不影响绑定）",
+                    C["accent"]))
+            except AccountError as e:
+                def back():
+                    self._opt_busy["on"] = True
+                    try:
+                        self.opt_in_var.set(not val)
+                    finally:
+                        self._opt_busy["on"] = False
+                    self._flash(f"通知设置失败：{e}", C["bad"])
+                self.after(0, back)
+        threading.Thread(target=run, daemon=True).start()
 
     def _bind_click(self):
         from toolbox.binding_ui import binding_dialog
@@ -509,7 +653,141 @@ class PetWindow(tk.Tk):
         except Exception as e:                  # noqa: BLE001 绑定失败不杀主窗
             LOG.warning("绑定对话框异常：%s", e)
             self._flash("绑定流程异常，请稍后再试", C["warn"])
+        self._acct_refresh()
+
+    # ---------- 生产状态（工作台卡片；数据后台取）
+
+    def _prod_refresh(self):
+        """后台汇总 folder_watch 状态 → 主线程渲染（新增字节要走目录）。"""
+        import toolbox.folder_watch as fw
+        from toolbox.config import load_config
+
+        def run():
+            out = {}
+            try:
+                wdir = (load_config().get("folder_watch") or {}).get(
+                    "watch_dir") or self.watch_dir
+                out["wdir"] = wdir
+                if wdir:
+                    out["summary"] = fw.summary()
+                    out["last_ts"] = fw.last_production_ts()
+                    out["due"] = fw.production_due(boot=False)
+                    out["added"] = fw.new_recordings_bytes(wdir)
+                    out["limit"] = fw.threshold_bytes()
+            except Exception as e:              # noqa: BLE001 状态卡永不杀窗
+                LOG.info("生产状态汇总失败：%s", e)
+            self.after(0, lambda o=out: self._render_prod(o))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _render_prod(self, prod=None):
+        if prod is not None:
+            self._prod = prod
+        prod, pre = self._prod, self._pre
+        q = prod.get("summary") or {}
+        if q:
+            self.queue_lab.config(
+                text=f"待处理 {q.get('queued', 0)} · 进行 {q.get('running', 0)}"
+                     f" · 成功 {q.get('done', 0)}"
+                     f" · 失败 {len(q.get('failed', []))}（详见 pet.log）")
+        if prod.get("wdir"):
+            self.works_lab.config(
+                text=self._works_text(prod, q))
+        # 工作台徽标链：目录 → 登录 → 绑定 → 权益 → 生产窗口
+        api, _ = self._acct_cfg()
+        badge, detail, act, cmd = "…", "", None, None
+        if not prod.get("wdir"):
+            badge, detail = "待选择文件夹", "点「更换文件夹」选定录像目录，后台自动扫描"
+        elif api and not pre.get("logged_in"):
+            badge, detail = "未登录", "登录后按规则自动生产（04:00/开机补跑）"
+            act, cmd = "去登录", self._acct_click
+        elif pre.get("binding") == "none":
+            badge, detail = "微信未绑定", "绑定后当日自动补跑生产"
+            act, cmd = "去绑定", self._bind_click
+        elif pre.get("member") is False:
+            badge, detail = "权益未开通", "由后台白名单开通，前台不售卖"
+        elif q.get("running"):
+            badge, detail = "生产中…", f"队列进行 {q['running']} 个（完成自动出候选）"
+        elif prod.get("last_ts") and prod.get("due") and \
+                not prod["due"][0] and "窗口内已生产" in prod["due"][1]:
+            t = time.strftime("%H:%M", time.localtime(prod["last_ts"]))
+            badge, detail = f"今日已生产 {t}", "候选在「我的作品」；窗口内不再重复生产"
+            act, cmd = "看作品", lambda: self._nav("works")
+        elif prod.get("added") is not None:
+            gb = prod["added"] / 1e9
+            hit = prod["added"] > prod.get("limit", 2e9)
+            badge = "待生产窗口" if hit else "新增不足"
+            detail = (f"近 24h 新增 {gb:.2f}GB"
+                      + ("（已达标，等待 04:00 或开机补跑）" if hit
+                         else " / 2GB，严格超过才生产；当日权益照算"))
+        self.prod_badge.config(text=badge)
+        color = {"未登录": C["bad"], "微信未绑定": C["warn"],
+                 "权益未开通": C["bad"], "生产中…": C["accent"],
+                 "待选择文件夹": C["dim"], "新增不足": C["dim"]}.get(
+                     badge, C["good"] if "已生产" in badge else BRAND["primary"])
+        self.prod_badge.config(fg=color)
+        self.prod_detail.config(text=detail)
+        if act:
+            self.prod_act.config(text=act, command=cmd)
+            self.prod_act.pack()
+        else:
+            self.prod_act.pack_forget()
+        self._render_dir()
+
+    def _works_text(self, prod, q):
+        """我的作品页状态行（真实数据；三选一在 portal 完成）。"""
+        if prod.get("last_ts"):
+            t = time.strftime("%m-%d %H:%M", time.localtime(prod["last_ts"]))
+            base = f"最近一次生产：{t}（成功 {q.get('done', 0)} 场）"
+        else:
+            base = "尚未生产（等录像新增超阈值后自动生产）"
+        return base + "\n候选与三选一在作品页进行（契约 C2S-15 起另接，当前为入口）"
+
+    def _open_portal(self):
+        from toolbox.config import load_config
+        url = ((load_config().get("account") or {}).get("portal_url")
+               or "").strip()
+        if not url:
+            self._flash("作品页地址未配置（account.portal_url）", C["warn"])
+            return
+        webbrowser.open(url)
+
+    def _render_dir(self):
+        from toolbox.config import load_config
+        wdir = (load_config().get("folder_watch") or {}).get(
+            "watch_dir") or self.watch_dir
+        short = str(wdir) if len(str(wdir)) <= 46 else str(wdir)[:44] + "…"
+        self.dir_lab.config(text=short or "未选择",
+                            fg=C["fg"] if wdir else C["dim"])
+        self.set_dir_lab.config(text=f"录像目录：{short or '未选择'}")
+
+    def _all_refresh(self):
         self._prereq_refresh()
+        self._prod_refresh()
+
+    # ---------- 目录唯一选择入口（IDEA-003/REQ-20261021-001）
+
+    def _browse(self):
+        d = filedialog.askdirectory(initialdir=str(ROOT / "video"),
+                                    title="选择录像目录（后台每 2h 自动扫描）")
+        if d:
+            self._set_watch_dir(str(Path(d)))
+
+    def _set_watch_dir(self, d):
+        """所选目录即后台监控目录（唯一入口）：写内存+config 持久保存，
+        日任务循环 10 分钟内接管（IDEA-003 交互细则）。"""
+        if self.watch_dir == d:
+            return
+        self.watch_dir = d
+        try:
+            from toolbox.config import persist_watch_dir
+            persist_watch_dir(d)
+            LOG.info("监控目录已设置：%s", d)
+        except Exception as e:                  # noqa: BLE001 持久化失败不拦选目录
+            LOG.warning("watch_dir 持久化失败（本次运行仍生效）：%s", e)
+        self._save_hist()
+        self._render_dir()
+        self._flash("录像目录已设置，后台每 2 小时自动扫描", C["accent"])
+        self._prod_refresh()
 
     # ---------- 目录监控（后台日任务，REQ-20261019-013；
     #             扫描/生产分离 REQ-20261021-001 规则 2-4）
@@ -573,6 +851,7 @@ class PetWindow(tk.Tk):
                         if added > limit:           # 严格 >（等于/低于不启动）
                             LOG.info("生产开始（%s）：近 24h 新增 %.2fGB > "
                                      "%.0fGB", why, added / 1e9, limit / 1e9)
+                            self.after(0, lambda: self._tray_tip("生产中"))
                             try:
                                 n_ok, n_fail = self._daily_pass(wdir)
                                 LOG.info("生产完成：成功 %d / 失败 %d",
@@ -580,7 +859,7 @@ class PetWindow(tk.Tk):
                                 if n_ok or n_fail:
                                     self.after(0, lambda ok=n_ok, fl=n_fail:
                                                self._flash(
-                                                   f"后台处理完成：成{ok} 败{fl}"
+                                                   f"生产完成：成{ok} 败{fl}"
                                                    "（详见 pet.log）",
                                                    C["warn"] if fl else C["dim"]))
                             except Exception as e:  # noqa: BLE001 单轮失败不杀线程
@@ -591,6 +870,7 @@ class PetWindow(tk.Tk):
                                      "%.0fGB，当日权益照算", why, added / 1e9,
                                      limit / 1e9)
                         fw.mark_production_run()   # 生产时刻消耗（含跳过）
+                    self.after(0, self._prod_refresh)
             self.daily_stop.wait(timeout=600)   # 10 分钟粒度复查窗口/绑定门
 
     def _bind_gate(self):
@@ -607,7 +887,7 @@ class PetWindow(tk.Tk):
         except Exception:                        # noqa: BLE001 预检失败放行
             return ""
         if pre.get("logged_in") and pre.get("binding") == "none":
-            return "微信未绑定（主窗「去绑定」完成后自动补跑）"
+            return "微信未绑定（账号设置里「去绑定」完成后自动补跑）"
         return ""
 
     def _daily_pass(self, wdir):
@@ -628,7 +908,7 @@ class PetWindow(tk.Tk):
     # ---------- 托盘（最小化驻留右下角通知区）
 
     def _on_unmap(self, _e):
-        # wm_state() 而非 state()：self.state 是跑链状态属性，遮蔽了同名 Tk 方法
+        # wm_state() 而非 state()：避免与任何同名属性遮蔽 Tk 方法
         if self.wm_state() == "iconic":         # 区分最小化与程序内 withdraw
             self.after(120, self._to_tray)
 
@@ -651,14 +931,14 @@ class PetWindow(tk.Tk):
             return
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        d.rounded_rectangle([4, 4, 60, 60], radius=14, fill="#E8663C")
+        d.rounded_rectangle([4, 4, 60, 60], radius=14, fill=BRAND["primary"])
         d.polygon([(26, 20), (26, 44), (48, 32)], fill="#FFFFFF")   # ▶
         menu = pystray.Menu(
             pystray.MenuItem("显示主界面", self._tray_act_show, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", self._tray_act_quit),
         )
-        self.tray = pystray.Icon("dashijie", img, "陪玩大师姐 · 跑链", menu)
+        self.tray = pystray.Icon("dashijie", img, "陪玩大师姐", menu)
         try:
             self.tray.run_detached()
         except Exception as e:                   # noqa: BLE001 托盘失败不杀主窗
@@ -692,263 +972,7 @@ class PetWindow(tk.Tk):
             except Exception:                    # noqa: BLE001 提示更新尽力而为
                 pass
 
-    # ---------- 开跑 / 停止
-
-    def _browse(self):
-        d = filedialog.askdirectory(initialdir=str(ROOT / "video"),
-                                    title="选择录像目录（后台每 2h 自动扫描）")
-        if d:
-            d = str(Path(d))
-            self.addr_var.set(d)
-            self._set_watch_dir(d)
-
-    def _set_watch_dir(self, d):
-        """所选目录即后台监控目录（唯一入口）：写内存+config 持久保存，
-        日任务循环 10 分钟内接管（IDEA-003 交互细则）。"""
-        if self.watch_dir == d:
-            return
-        self.watch_dir = d
-        try:
-            from toolbox.config import persist_watch_dir
-            persist_watch_dir(d)
-            LOG.info("监控目录已设置：%s", d)
-        except Exception as e:                  # noqa: BLE001 持久化失败不拦选目录
-            LOG.warning("watch_dir 持久化失败（本次运行仍生效）：%s", e)
-
-    def _toggle_run(self):
-        if self.proc and self.proc.poll() is None:
-            self._stop()
-            return
-        addr = self.addr_var.get().strip()
-        if not addr:
-            self._flash("先选择录像目录", C["warn"])
-            return
-        if "://" in addr or addr.upper().startswith("BV"):
-            # 目录唯一入口（IDEA-003）：BV/URL 不进 UI，异常简短提示
-            self._flash("仅支持本地录像目录（BV/URL 请用命令行 toolbox pipeline）",
-                        C["warn"])
-            return
-        if Path(addr).is_dir():
-            self._set_watch_dir(addr)           # 手填目录同样收编为监控目录
-        self._start(addr)
-
-    def _on_main_button(self):
-        """主按钮分发：出错/带断链存档=续跑（--skip 已完成阶段），其余=开始/停止。"""
-        if (self.state == "err" or
-                (self.state in ("idle", "stop") and self._retry_saved)):
-            addr = (self._last_addr or "").strip() or self.addr_var.get().strip()
-            cur = self.addr_var.get().strip()
-            # 跨重启续跑只在地址栏为空或与断链场次一致时生效；填了新址视为新跑
-            if self._retry_skip and (self.state == "err" or not cur
-                                     or cur == self._retry_saved.get("addr")
-                                     or cur == addr):
-                if addr:
-                    self._start(addr, skip=self._retry_skip)
-                    return
-        self._toggle_run()
-
-    def _probe_durations(self, addr):
-        """本地目录/文件 -> {文件名: 秒}（ffprobe 逐个探测，失败容忍）。
-        URL 场次返回空表，进度模型自动退化为按分片数。"""
-        p = Path(addr)
-        try:
-            if p.is_file():
-                vids = [p]
-            elif p.is_dir():
-                from toolbox.events import collect_videos
-                vids = collect_videos(addr)
-            else:
-                return {}
-            out = {}
-            for v in vids:
-                r = subprocess.run(
-                    ["ffprobe", "-v", "error", "-show_entries",
-                     "format=duration", "-of", "csv=p=0", str(v)],
-                    capture_output=True, text=True, timeout=15,
-                    creationflags=proc.NO_WINDOW)
-                out[str(v)] = float(r.stdout.strip())
-            LOG.info("进度时长表：%d 个视频共 %.0f 分钟",
-                     len(out), sum(out.values()) / 60)
-            return out
-        except Exception as e:                   # noqa: BLE001 探测失败不拦跑链
-            LOG.info("进度时长探测失败（退化为按片数）：%s", e)
-            return {}
-
-    def _start(self, addr, skip=()):
-        # 登录门控（REQ-20261019-013）：未登录先弹登录框，成功则继续开跑
-        try:
-            from toolbox.account import require_login
-            require_login()
-        except Exception as e:                  # noqa: BLE001 门控拒绝即返回
-            self._flash(str(e).split("] ", 1)[-1], C["warn"])
-            api, prod = self._acct_cfg()
-            if api:
-                from toolbox.account_ui import login_dialog
-                if login_dialog(self, api, prod):
-                    self._acct_refresh()
-                    self._flash("登录成功，继续…", C["accent"])
-                else:
-                    return
-            else:
-                return
-        self._save_hist()
-        self.parser = ProgressParser()
-        self.parser.set_media(self._probe_durations(addr))
-        self._logs = []
-        self._retry_skip = None
-        self._last_addr = addr
-        self._hide_status()
-        self._set_state("run", f"开跑：{Path(addr).name[:26]}")
-        if getattr(sys, "frozen", False):         # exe 形态：自身即 CLI 入口
-            args = [sys.executable, "pipeline", addr]
-        else:
-            args = [sys.executable, "-X", "utf8", "-m", "toolbox",
-                    "pipeline", addr]
-        if skip:
-            args += ["--skip", *skip]
-        # 显式传旗标：默认评估链开启（REQ-20261021-002），--no-run-eval 关
-        args.append("--run-eval" if self.run_eval_var.get()
-                    else "--no-run-eval")
-        LOG.info("跑链启动：%s（skip=%s run_eval=%s）",
-                 addr, list(skip) or "无", self.run_eval_var.get())
-        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-        self.proc = subprocess.Popen(args, cwd=str(ROOT), env=env,
-                                     stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT,
-                                     text=True, encoding="utf-8",
-                                     errors="replace")
-        threading.Thread(target=self._reader, daemon=True).start()
-        self.btn.config(text="■  停止")
-
-    def _reader(self):
-        for line in self.proc.stdout:
-            self.q.put(line.rstrip("\n"))
-        self.q.put(None)            # EOF 哨兵
-
-    def _kill_tree(self):
-        if self.proc and self.proc.poll() is None:
-            if os.name == "nt":     # pipeline 会再派生 ffmpeg/扫描子进程
-                subprocess.run(["taskkill", "/PID", str(self.proc.pid),
-                                "/T", "/F"], capture_output=True,
-                               creationflags=proc.NO_WINDOW)
-            else:
-                self.proc.terminate()
-
-    def _stop(self):
-        self.state = "stop"         # 抢在 _finish 前定性，EOF 到达后不再覆盖
-        self._kill_tree()
-        self._set_state("stop", "已手动停止，素材我先收好…")
-        self.btn.config(text="▶  开始跑链")
-
-    # ---------- 轮询与渲染
-
-    def _poll(self):
-        drained = False
-        try:
-            while True:
-                line = self.q.get_nowait()
-                if line is None:    # 进程收尾
-                    self._finish()
-                    break
-                self.parser.update(line)
-                self._logs = (self._logs + [line])[-15:]
-                LOG_PIPE.info("%s", line)         # 全量落盘，排障可查
-                drained = True
-        except queue.Empty:
-            pass
-        if drained:
-            self._render()
-        self.after(120, self._poll)
-
-    def _finish(self):
-        if self.state == "stop":
-            return
-        code = self.proc.poll() if self.proc else 0
-        if code is None:
-            # stdout EOF 先于进程退出到达（收尾竞态）：此时判 None 会把
-            # 明明跑完的链误报成失败（2026-10-09 pet.log rc=None 实录），
-            # 等它真正退出再定性
-            try:
-                code = self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                code = -1
-        if code == 0 and self.parser.finished:
-            self._retry_saved = {}              # 跑通即清断链存档
-            self._save_hist()
-            st = latest_stats()
-            name = (st["session"] or self.parser.session or "")[:18]
-            self._set_state("done", f"完成！{name} 击倒{_or_dash(st['knockdowns'])} "
-                                    f"拾取{_or_dash(st['pickups'])} "
-                                    f"匹配{_or_dash(st['queues'])} "
-                                    f"语音{_or_dash(st['voice'])}")
-            LOG.info("跑链完成：%s", self._status_text)
-        else:
-            why = self.parser.error_line or f"退出码 {code}，看日志排查"
-            self._set_state("err", f"出错：{why}")
-            self._retry_skip = [name for name, _ in STAGES
-                                if self.parser.stages[name]["status"]
-                                in ("done", "skip")]
-            self._retry_saved = {                 # 落盘：跨重启一键续跑
-                "addr": self._last_addr or self.addr_var.get().strip(),
-                "skip": self._retry_skip,
-                "ts": time.strftime("%Y-%m-%d %H:%M:%S")}
-            self._save_hist()
-            LOG.warning("跑链失败：rc=%s err=%s 可续跑（跳过 %d 个已完成阶段）",
-                        code, why, len(self._retry_skip))
-        self.btn.config(text="↻  续跑" if self.state == "err"
-                        else "▶  开始跑链")
-        self._tray_tip("完成" if self.state == "done" else
-                       ("出错，点续跑" if self.state == "err" else "待命"))
-        if self.state == "done":
-            self.pbar["value"] = 100
-            self.after(4000, self._hide_progress)   # 满格停留一会儿再收
-        else:
-            self._hide_progress()
-
-    def _hide_progress(self):
-        self.pbar.pack_forget()
-        self.plab.pack_forget()
-
-    def _render(self):
-        p = self.parser
-        if self.state == "run":
-            frac, cur = p.progress()
-            eta = p.eta_sec()
-            self.pbar.pack_forget()
-            self.pbar.pack(fill="x", pady=(0, 2))
-            self.plab.pack_forget()
-            self.plab.pack(fill="x", pady=(0, 6))
-            self.pbar["value"] = frac * 100
-            bits = []
-            disp = dict(STAGES).get(cur, "")
-            if disp:
-                bits.append(disp)
-            bits.append(f"{int(frac * 100)}%")
-            if eta is not None:
-                bits.append(f"剩约{eta / 60:.0f}分" if eta >= 90
-                            else "即将完成")
-            el = (time.time() - p.t0) / 60
-            if el >= 1:
-                bits.append(f"已用{el:.0f}分")
-            if p.session:
-                bits.append(p.session[:14])
-            text = " · ".join(bits)
-            self._set_status(text, C["accent"])
-            self._tray_tip(text)
-
     # ---------- 状态行（常驻一行文字；出错常驻，其余短闪）
-
-    def _set_state(self, state, status):
-        self.state = state
-        if state == "err":
-            self._show_status(status, C["bad"], sticky=True)
-        elif state == "run":
-            self._hide_status()                   # 进展由 _render 持续刷新
-        else:                                      # idle/done/stop 短闪提示
-            if status:
-                self._flash(status, C[STATE_COLOR.get(state, "dim")])
-            else:
-                self._hide_status()
 
     def _show_status(self, text, color=None, sticky=False):
         self._status_text = text
@@ -960,11 +984,6 @@ class PetWindow(tk.Tk):
         self._status_text = ""
         self.status_lab.config(text="")
 
-    def _set_status(self, text, color=None):
-        """只改文字不改粘滞语义（run 态持续刷新用）。"""
-        self._status_text = text
-        self.status_lab.config(text=text, fg=color or C["dim"])
-
     def _flash(self, text, color=None, sticky=False):
         """状态行短闪（toast），2.5s 后自动收起；sticky=True 常驻到下次动作。"""
         self._show_status(text, color or C["accent"], sticky=sticky)
@@ -972,7 +991,7 @@ class PetWindow(tk.Tk):
             self.after(2500, lambda: self._hide_status()
                        if self._status_text == text else None)
 
-    # ---------- 调试快照（PET_SNAPSHOT=<目录> 时各状态截屏）
+    # ---------- 调试快照（PET_SNAPSHOT=<目录> 时各页截屏）
 
     def _dev_snapshot(self):
         snapdir = os.environ.get("PET_SNAPSHOT")
@@ -996,26 +1015,10 @@ class PetWindow(tk.Tk):
             ImageGrab.grab(bbox=(x, y, x + w, y + h)).save(
                 Path(snapdir) / f"{name}.png")
 
-        def demo_run():
-            p = self.parser
-            p.session, p.parts = "直接跑刀2小时一千三", 2
-            for n, s in (("download", 86), ("asr", 540), ("speaker", 95)):
-                p.stages[n] = {"status": "done", "secs": s}
-            p.stages["detect"] = {"status": "run", "secs": None}
-            p.counts.update(knockdowns=12, pickups=None)
-            self._set_state("run", "")
-            self._render()
-
-        def demo_done():
-            for i, (n, _) in enumerate(STAGES):
-                self.parser.stages[n] = {"status": "done", "secs": 60 + i * 37}
-            self._set_state("done", "完成！击倒14 拾取9 语音6")
-
         self._snap_queue = [
-            ("idle", lambda: self._set_state("idle", "")),
-            ("run", demo_run),
-            ("done", demo_done),
-            ("err", lambda: self._set_state("err", "出错：OCR，看日志排查")),
+            ("home", lambda: self._nav("home")),
+            ("works", lambda: self._nav("works")),
+            ("settings", lambda: self._nav("settings")),
         ]
 
         def step():
@@ -1028,22 +1031,17 @@ class PetWindow(tk.Tk):
         step()
 
     def _on_close(self):
-        # 后台日任务的跑链子进程同样要树杀（防孤儿烧 CPU）
+        # 后台日任务的跑链子进程树杀（防孤儿烧 CPU）
         if self.daily_thread is not None and self.daily_thread.is_alive():
             import toolbox.folder_watch as fw
             self.daily_stop.set()
             fw.kill_current()
-        if self.proc and self.proc.poll() is None:
-            if not messagebox.askokcancel(
-                    "还在跑", "识别链仍在运行，退出会终止整条链，确定？"):
-                return
-            self.state = "stop"
-            self._kill_tree()
         self._save_hist()
         self._tray_stop()
         self.destroy()
 
 
 def run(address=""):
-    """GUI 入口（cli: python -m toolbox pet [--address ...]）。"""
+    """GUI 入口（cli: python -m toolbox pet）。address 已忽略（UI V1 无
+    BV/URL 入口，内部联调走 toolbox pipeline）。"""
     PetWindow(address=address).mainloop()

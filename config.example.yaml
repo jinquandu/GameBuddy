@@ -37,6 +37,8 @@ server:
 account:
   api_url: https://95188.pw/api/account/v1
   # production_url: ""      # C2S-13/14 生产查询基址；留空=由 api_url 推导
+  # portal_url: ""          # 我的作品页（三选一/发布入口，通知服务 portal）；
+                           # 配置后主窗「打开作品页」可用，留空则提示未配置
   # gate_pipeline: true     # 识别链路登录门控（REQ-20261019-013）：配了 api_url
                            # 即默认开启；内部机/开发可设 false 关闭
 

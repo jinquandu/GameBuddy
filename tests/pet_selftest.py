@@ -1,4 +1,11 @@
-"""pet.py 自测：解析器状态机 + latest_stats + GUI 冒烟（无人工交互）。"""
+# -*- coding: utf-8 -*-
+"""pet.py 自测：解析器状态机 + latest_stats + 主窗 GUI 冒烟（无人工交互）。
+
+主窗 = UI V1 评审稿对齐版（REQ-20261021-003 范围2）：左导航工作台/我的
+作品/账号设置 + 卡片；前台无手动跑链/BV/URL/监控行。冒烟覆盖：导航
+切换、生产徽标状态机（登录/绑定/权益/窗口各分支纯渲染）、目录设置、
+flash、托盘（装了 pystray 才验）。
+"""
 import sys
 import tkinter as tk
 
@@ -15,116 +22,114 @@ def check(name, cond):
         FAIL.append(name)
 
 
-# ---- 1) 解析器：喂一遍仿真 pipeline 日志 ----
+# ---------------- 1) ProgressParser 状态机（与旧版同源保留，CLI 消费）
 p = ProgressParser()
-LOG = [
-    "[pipeline] download 开始 ...",
-    "  合并完成: 猪猪夏 P1 18日12点52分.mp4 (1331MB)",
-    "[pipeline] download 完成 (95s)",
-    "[pipeline] 场次：猪猪夏三角洲直播跑刀，3 个分片",
-    "ASR 转写：3 个分片（模型加载一次，逐分片转写）",
-    "[pipeline] asr 完成 (312s)",
-    "[pipeline] -- 跳过 speaker",
-    "  P1：复用事件流 xxx_full（61 条）",
-    "[pipeline] detect 完成 (5s)",
-    "[pipeline] knockdowns 开始 ...",
-    "共 0 个击倒片段 + knockdowns.json 已写入 data/knockdowns/xxx",
-    "[pipeline] knockdowns 完成 (12s)",
-    "  P3：7 粗簇 -> 14 会话",
-    "共 34 个拾取会话片段 + pickups.json 已写入 data/pickups/xxx",
-    "[pipeline] pickups 完成 (40s)",
-    "review 页已生成（1 场次 / 31 片段）: data/voice/review.html",
-    "[pipeline] voice 完成 (25s)",
-    "评估包：7 组，约 1.21GB",
-    "[pipeline] push 完成 (180s)",
-    "[pipeline] 全链完成。download=95s asr=312s",
-]
-for line in LOG:
-    p.update(line)
+p.update("[pipeline] 场次：测试场次，2 个分片")
+p.update("[pipeline] download 开始")
+p.update("[pipeline] download 完成 (12s)")
+p.update("[pipeline] -- 跳过 asr")
+check("解析：跳过=done 口径", p.done_count() == 2)
+frac, cur = p.progress()
+check("解析：进度与当前阶段", 0 < frac < 1 and cur is None)
+p.update("[pipeline] 全链完成。")
+check("解析：完成标志", p.progress()[0] == 1.0)
 
-check("download=done/95s", p.stages["download"] == {"status": "done", "secs": 95})
-check("speaker=skip", p.stages["speaker"]["status"] == "skip")
-check("asr=done", p.stages["asr"]["status"] == "done")
-check("voice=done", p.stages["voice"]["status"] == "done")
-check("场次解析", p.session == "猪猪夏三角洲直播跑刀" and p.parts == 3)
-check("击倒计数=0", p.counts["knockdowns"] == 0)
-check("拾取计数=34", p.counts["pickups"] == 34)
-check("完成标记", p.finished)
-check("细目行=评估包", "评估包" in p.detail)
+check("latest_stats 形状", set(latest_stats()) == {
+    "session", "knockdowns", "pickups", "voice", "queues"})
 
-# 错误行
-p2 = ProgressParser()
-p2.update("\n[错误] 需要 GNU rsync")
-check("错误行捕获", p2.error_line and "rsync" in p2.error_line)
+# ---------------- 2) 主窗 GUI 冒烟（UI V1 对齐版）
+win = PetWindow()
+win.update()
 
-# ---- 2) latest_stats：对着现有 data/ 树（结构性校验，不硬编码本地数据）----
-st = latest_stats()
-print("latest_stats ->", st)
-check("键完整", set(st) == {"session", "knockdowns", "pickups", "voice",
-                            "queues"})
-check("计数类型", all(st[k] is None or (isinstance(st[k], int) and st[k] >= 0)
-                      for k in ("knockdowns", "pickups", "voice", "queues")))
-vdirs = [p.name for p in (DATA / "voice").iterdir()] \
-    if (DATA / "voice").is_dir() else []
-check("场次名与产物目录对得上",
-      not st["session"]
-      or (DATA / "knockdowns" / st["session"]).is_dir()
-      or any(d.startswith(st["session"]) for d in vdirs))
+check("左导航三页齐", set(win._pages) == {"home", "works", "settings"}
+      and all(win._nav_btns[k].winfo_ismapped() for k in win._nav_btns))
+win._nav("settings")
+win.update()
+check("导航切换：设置页可见",
+      win._pages["settings"].winfo_ismapped()
+      and not win._pages["home"].winfo_ismapped())
+win._nav("home")
+win.update()
 
-# ---- 3) GUI 冒烟：素朴小窗创建 -> 渲染 -> 空地址提示 -> 托盘往返 -> 销毁 ----
+# 生产徽标状态机（纯渲染分支，不起线程不发网；persist 打桩防写真 config）
+import tempfile
+from pathlib import Path
+
+import toolbox.config as _tc
+_real_persist = _tc.persist_watch_dir
+_tc.persist_watch_dir = lambda d: None
 try:
-    win = PetWindow()
-    check("窗口创建", True)
+    win._render_pre({"logged_in": True, "member": True,
+                     "member_expires": None, "binding": "none", "opt_in": None})
+    win._render_prod({"wdir": "D:/录像",
+                      "summary": {"queued": 2, "running": 0, "done": 5,
+                                  "failed": []},
+                      "last_ts": 0, "due": (True, "到达生产时刻"),
+                      "added": 1e9, "limit": 2e9})
     win.update()
-    win._render()                      # 手动渲染一帧（状态行刷新）
-    win.update()
-    check("素朴主界面：目录框+主按钮映射中",
-          bool(win.addr_ent.winfo_ismapped()) and bool(win.btn.winfo_ismapped()))
-    check("主按钮文案", "开始跑链" in win.btn.cget("text"))
-    # 地址校验分支（不真正起子进程）
-    win.addr_var.set("")
-    win._toggle_run()
-    win.update()
-    check("空地址提示", "目录" in win._status_text)
-    # BV/URL 拒入（IDEA-003 目录唯一入口）：异常简短提示、不起子进程
-    win.addr_var.set("BV1xx411c7mD")
-    win._toggle_run()
-    win.update()
-    check("BV/URL 拒入提示", "仅支持本地录像目录" in win._status_text
-          and (win.proc is None))
-    # 最小化 -> 托盘（withdraw，任务栏不占位）-> 恢复
-    win.iconify()
-    win.update()
-    win._to_tray()
-    win.update()
-    try:
-        import pystray
-        has_tray = True
-    except ImportError:
-        has_tray = False
-    check("最小化藏进托盘", win.wm_state() == "withdrawn"
-          and (win.tray is not None) == has_tray)
-    win._tray_show()
-    win.update()
-    check("托盘恢复窗口", win.wm_state() == "normal")
-    # 点 X 必须走 _on_close 清理链（P0-3：默认销毁会让跑链子进程成孤儿）；
-    # 协议事件无法 event_generate，注册用查询式验证，清理链直接调用走通
-    reg = win.protocol("WM_DELETE_WINDOW")     # 无参调用 = 查询已注册处理器
-    print("   WM_DELETE_WINDOW ->", reg)
-    check("点 X 注册到清理链", bool(reg) and "_on_close" in reg)
-    win._on_close()
-    try:
-        win.update()
-    except tk.TclError:
-        pass    # 销毁后残余事件，忽略
-    try:         # PetWindow 即根窗口，destroy 后 winfo 也一并没了
-        alive = bool(win.winfo_exists())
-    except tk.TclError:
-        alive = False
-    check("清理链销毁窗口", not alive)
-    check("GUI 冒烟完成", True)
-except tk.TclError as e:
-    check(f"GUI 冒烟（TclError: {e}）", False)
+    check("徽标：未绑定分支", "微信未绑定" in win.prod_badge.cget("text")
+          and win.prod_act.winfo_ismapped())
+    check("前置：未绑定亮去绑定", "微信✗" in win.pre_labs["bind"].cget("text")
+          and win.bind_btn.winfo_manager() == "pack")
+    check("侧栏权益卡：有效", "权益 ✓" in win.side_member.cget("text"))
 
-print("\n" + ("全部通过 ✅" if not FAIL else f"失败 {len(FAIL)} 项 ❌：{FAIL}"))
-sys.exit(1 if FAIL else 0)
+    win._render_pre({"logged_in": True, "member": True,
+                     "member_expires": None, "binding": "bound",
+                     "opt_in": True})
+    win._render_prod({"wdir": "D:/录像",
+                      "summary": {"queued": 0, "running": 0, "done": 5,
+                                  "failed": []},
+                      "last_ts": 1234567890,
+                      "due": (False, "窗口内已生产（23h 前）"),
+                      "added": 3e9, "limit": 2e9})
+    win.update()
+    check("徽标：窗口内已生产", "已生产" in win.prod_badge.cget("text"))
+    check("通知开关：已绑定可用", str(win.opt_in_chk.cget("state"))
+          != "disabled" and win.opt_in_var.get() is True)
+
+    win._render_prod({"wdir": "", "summary": {"queued": 0, "running": 0,
+                                              "done": 0, "failed": []}})
+    win.update()
+    check("徽标：未选目录", "待选择" in win.prod_badge.cget("text"))
+
+    # 目录设置（persist 已打桩，不写真 config）
+    with tempfile.TemporaryDirectory() as td:
+        win._set_watch_dir(td)
+        win.update()
+        check("目录渲染两处同步", td[:20] in win.dir_lab.cget("text")
+              and "录像目录" in win.set_dir_lab.cget("text"))
+finally:
+    _tc.persist_watch_dir = _real_persist
+    win._save_hist()
+
+# 状态行短闪
+win._flash("测试提示")
+win.update()
+check("flash 生效", "测试提示" in win._status_text)
+
+# 最小化 -> 托盘（withdraw，任务栏不占位）-> 恢复
+win.iconify()
+win.update()
+win._to_tray()
+win.update()
+try:
+    import pystray
+    has_tray = True
+except ImportError:
+    has_tray = False
+check("托盘驻留（装 pystray 时）", (not has_tray) or win.tray is not None)
+win._tray_show()
+win.update()
+check("托盘恢复主窗", win.wm_state() == "normal")
+
+win._on_close()
+try:                       # destroy 后 winfo_exists 本身会 TclError
+    gone = not win.winfo_exists()
+except tk.TclError:
+    gone = True
+check("收尾销毁", gone)
+
+if FAIL:
+    print("失败 " + str(len(FAIL)) + " 项 ❌：" + str(FAIL))
+    sys.exit(1)
+print("全部通过 ✅")

@@ -1,16 +1,20 @@
-"""pet 端到端：真实 subprocess 跑 skip-all pipeline，验证窗口走到 done 态。"""
+# -*- coding: utf-8 -*-
+"""pet e2e：真实 subprocess 跑 skip-all pipeline（走后台日任务同款入口
+folder_watch.run_pipeline_subprocess——UI V1 对齐后前台无手动跑链）。
+
+Popen 打桩注入 --skip 全阶段：秒级完成、零副作用；验证队列路径的
+子进程配方（exe/CLI 双形态 argv、UTF-8、退出码与输出收集）。
+"""
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
-import toolbox.pet as pet
+import toolbox.folder_watch as fw
 
 _real_popen = subprocess.Popen
-# queues 进 pipeline（2026-10-14）时漏了这里：不在 SKIP 表就会对真场次
-# 跑按钮区 OCR（分钟级），60s 超时后测试挂 run 态失败，且旧收尾直接
-# destroy() 绕过杀链，每失败一次漏一个孤儿子进程（P0-3 病理现场）
 SKIP = ["--skip", "download", "asr", "speaker", "detect",
         "knockdowns", "pickups", "queues", "voice", "push"]
 
@@ -21,33 +25,32 @@ def _patched_popen(args, **kw):
     return _real_popen(args, **kw)
 
 
-pet.subprocess.Popen = _patched_popen
+fw.subprocess.Popen = _patched_popen
 
-win = pet.PetWindow()
-win.addr_var.set("video/接直播跑刀 2小时一千万 steam的也可以打 猪猪夏三角洲直播跑刀")
-win.run_eval_var.set(False)
-win._toggle_run()
+target = Path("video/2026-10-09 桌面录制") / \
+    "2026-10-09 桌面录制 P1 09日13点43分.mp4"
+assert target.exists(), f"测试素材缺失：{target}"
 
-t0 = time.time()
-while win.state not in ("done", "err", "stop") and time.time() - t0 < 60:
-    win.update()
-    time.sleep(0.05)
+# 登录门控（REQ-20260919-013）：子进程是独立进程、读真实 config——给它落
+# 一个临时本地会话过门（门控只查本地 bearer 不访网，skip-all 不上送），
+# 跑完恢复原会话。门控语义本身由 gating_daily_regress 覆盖。
+import toolbox.device_identity as di
 
-status = win._status_text
-done_stages = [n for n, s in win.parser.stages.items() if s["status"] == "skip"]
-print("state =", win.state)
-print("status =", status)
-print("skip 标记数 =", len(done_stages),
-      "done_count =", win.parser.done_count())
-print("日志尾 =", win._logs[-1] if win._logs else "")
-ok = win.state == "done" and "完成" in status and len(done_stages) == 9
-if win.proc is None:
-    win._on_close()          # 完整清理链（存历史/退托盘/destroy）
-else:
-    win._stop()              # 兜底杀树：失败路径也不留孤儿子进程
+_real_sess = di.load_session()
+di.save_session({"user_id": "e2e", "bearer": "e2e-tok",
+                 "expires_at_ts": time.time() + 3600})
 try:
-    win.destroy()
-except Exception:
-    pass
+    t0 = time.time()
+    rc, out = fw.run_pipeline_subprocess(str(target))
+    dur = time.time() - t0
+finally:
+    if _real_sess.get("bearer"):
+        di.save_session(_real_sess)
+    else:
+        di.clear_session()
+
+print("rc =", rc, f"（{dur:.1f}s）")
+print("输出尾 =", out[-200:] if out else "")
+ok = rc == 0 and "全链完成" in out
 print("E2E", "PASS ✅" if ok else "FAIL ❌")
 sys.exit(0 if ok else 1)

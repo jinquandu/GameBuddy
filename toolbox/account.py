@@ -315,11 +315,23 @@ class AccountClient:
                              + quote(request_id, safe="") + "/cancel",
                              {}, bearer=bearer)
 
+    def notification_consent(self, opt_in):
+        """POST /wechat-binding/consent：通知开关（与绑定有效性分离，
+        方案A §4——开关关闭≠解绑）。"""
+        bearer, _ = self._bearer()
+        if not bearer:
+            raise AccountError("invalid_token", "未登录或会话过期", 401)
+        return self._request(self.api, "POST", "/wechat-binding/consent",
+                             {"notification_opt_in": bool(opt_in)},
+                             bearer=bearer)
+
     def prerequisites(self):
         """三前置看板数据（方案A L1 体验层，登录∧权益∧绑定）。member/
-        binding 缺失 = None（未知，服务端未返回或网络失败）——L1 不是安全
-        边界，未知不拦截、不缓存，权威判断在 C2S-12 服务端受理。"""
-        out = {"logged_in": False, "member": None, "binding": None}
+        member_expires/binding/opt_in 缺失 = None（未知，服务端未返回或
+        网络失败）——L1 不是安全边界，未知不拦截、不缓存，权威判断在
+        C2S-12 服务端受理。"""
+        out = {"logged_in": False, "member": None, "member_expires": None,
+               "binding": None, "opt_in": None}
         bearer, _ = self._bearer()
         out["logged_in"] = bool(bearer)
         if not bearer:
@@ -327,12 +339,16 @@ class AccountClient:
         try:
             s = self.me_summary()
             out["member"] = s["membership_active"]
+            out["member_expires"] = s["membership_expires_at"]
             out["binding"] = s["binding_state"]   # /me 已扩展则单次取齐
         except AccountError:
             pass
-        if out["binding"] is None:                # /me 未扩展 → 既有绑定端点
-            try:
-                out["binding"] = self.wechat_binding()["state"]
+        if out["binding"] is None or out["opt_in"] is None:
+            try:                                   # 既有绑定端点兜底/补齐
+                b = self.wechat_binding()
+                if out["binding"] is None:
+                    out["binding"] = b["state"]
+                out["opt_in"] = b["opt_in"]
             except AccountError:
                 pass
         return out

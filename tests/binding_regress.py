@@ -43,7 +43,7 @@ def make_mock_server(state):
         def _run(self):
             p = self.path.split("?")[0]
             n = int(self.headers.get("Content-Length", 0))
-            self.rfile.read(n) if n else b""
+            body = json.loads(self.rfile.read(n)) if n else {}
             if p == "/api/account/v1/health":
                 out = {"status": "ok", "pc_device_auth_contract": "1.0"}
                 if state.get("binding_contract"):
@@ -51,6 +51,11 @@ def make_mock_server(state):
                 return self._json(out)
             if not self._bearer_ok() and p != "/api/account/v1/health":
                 return self._err(401, "invalid_token", "会话无效")
+            if p == "/api/account/v1/wechat-binding/consent":
+                state["binding"] = state.get("binding") or {}
+                state["binding"]["notification_opt_in"] = bool(
+                    body.get("notification_opt_in"))
+                return self._json({"binding": state["binding"]})
             if p == "/api/account/v1/me":
                 return self._json(state.get("me")
                                   or {"user_id": "u1", "phone": "138****0000"})
@@ -144,7 +149,8 @@ def main():
             except account.AccountError as e:
                 check(e.code == "invalid_token", "未登录:绑定查询拒绝")
             check(cli.prerequisites() == {"logged_in": False, "member": None,
-                                          "binding": None},
+                                          "member_expires": None,
+                                          "binding": None, "opt_in": None},
                   "prerequisites:未登录仅本地可判项")
 
             di.save_session({"user_id": "u1", "bearer": "tok-u1",
@@ -201,13 +207,26 @@ def main():
             state["binding"] = None
             pre = cli.prerequisites()
             check(pre == {"logged_in": True, "member": None,
-                          "binding": "none"},
+                          "member_expires": None, "binding": "none",
+                          "opt_in": None},
                   "prerequisites:回落 wechat-binding → none")
             state["binding_500"] = True                  # 网络失败 → 未知不拦
             pre = cli.prerequisites()
             check(pre["binding"] is None and pre["member"] is None,
                   "prerequisites:服务异常 → None(L1 未知不拦截)")
             state["binding_500"] = False
+
+            # 通知开关（设置页 Checkbutton 数据源；与绑定有效性分离）
+            state["binding"] = {"identity_verified": True,
+                                "relation_active": True,
+                                "needs_reconciliation": False,
+                                "notification_opt_in": True}
+            r = cli.notification_consent(False)
+            check(r["binding"]["notification_opt_in"] is False,
+                  "consent:关通知(不影响绑定)")
+            pre = cli.prerequisites()
+            check(pre["binding"] == "bound" and pre["opt_in"] is False,
+                  "prerequisites:bound + 关通知(开关≠解绑)")
 
             # C2S-12 binding_required → 引导文案（方案A:只引导不重试）
             state["reject_binding"] = True
