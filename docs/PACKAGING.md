@@ -82,13 +82,13 @@ ssh ecs "cd .../clients && sha256sum <名>-uploading.zip && \
 
 | 包 | SHA256(前16) | 内容 |
 | --- | --- | --- |
-| `dashijie-pet-20261021-r3.zip` | `759494cd848fbdcb` | =r2+UI 文案客户化(去契约编号/行话,用户反馈)+_render_dir 内存值优先修复;**当前推荐验证包** |
+| `dashijie-pet-20261021-r4.zip` | `be053752136ec207` | =r3+REQ-005 成片自动化对接(produce 轮询/works_url/双挂点)+服务端 produce 状态机与 nginx 已配齐(正向全链验收过);**当前推荐验证包** |
 | `dashijie-pet-20261021-r2.zip` | `34926222a0a687c5` | UI V1 三导航+绑定对话框+规则 1-4 全端侧+run-eval 默认+日志随包(REQ-004)+二级嵌套扫描;契约 1.3.2 |
 | `dashijie-pet-20261021.zip`(r1) | `9e76c7a63927447c` | =r2 减 REQ-004 两件(嵌套扫描/日志随包) |
 
-> r1~r3 均含:014 登录错误修复、002 run-eval 默认、001 规则 1(绑定)。
-> **r3 是当前推荐验证包**;官网正式位仍是 `DashijiePet-core-20261020.zip`
-> (p 包,4b2bf1b6…),等用户验收 r3 后切换。
+> r1~r4 均含:014 登录错误修复、002 run-eval 默认、001 规则 1(绑定)。
+> **r4 是当前推荐验证包**;官网正式位仍是 `DashijiePet-core-20261020.zip`
+> (p 包,4b2bf1b6…),等用户验收 r4 后切换。
 
 ## 6. 已知坑速查(细节见 memory)
 
