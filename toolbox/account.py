@@ -18,6 +18,16 @@ import urllib.request
 from toolbox import device_identity as di
 
 SUPPORTED_PC_AUTH = "1.0"
+SUPPORTED_PC_BINDING = "1.3.0"   # health.pc_binding_contract（S1 已声明）
+
+
+def binding_hint(exc):
+    """C2S-12 `403 binding_required` → 绑定引导文案（方案A）；其他错误 →
+    None。端侧收到只引导不重试；绑定状态不缓存，重试时服务端现查。"""
+    if isinstance(exc, AccountError) and exc.code == "binding_required":
+        return ("微信未绑定：请先在主窗完成微信绑定（登录后点「去绑定」），"
+                "完成后重试本操作")
+    return None
 
 
 class AccountError(RuntimeError):
@@ -156,6 +166,23 @@ class AccountClient:
             raise AccountError("invalid_token", "未登录或会话过期", 401)
         return self._request(self.api, "GET", "/me", bearer=bearer)
 
+    def me_summary(self):
+        """/me 归一：membership_active/binding_state 缺失 = None（未知）。
+        entitlements/binding 为 1.4.0 兼容性新增（2026-10-21 补录），端侧
+        容错展示、不缓存——权威判断在 C2S-12 受理（方案A L1）。"""
+        r = self.me()
+        ent = r.get("entitlements")
+        ent = ent if isinstance(ent, dict) else {}
+        b = r.get("binding")
+        return {
+            "user_id": r.get("user_id", "?"),
+            "phone": r.get("phone", ""),
+            "membership_active": ent.get("membership_active"),
+            "membership_expires_at": ent.get("membership_expires_at"),
+            "binding_state": (b.get("state") if isinstance(b, dict)
+                              else None),
+        }
+
     def logout(self):
         bearer, _ = self._bearer()
         di.clear_session()
@@ -211,3 +238,101 @@ class AccountClient:
         if "_raw" in r:
             return r["_raw"]
         raise AccountError("bad_response", "产物响应非二进制")
+
+    # ------------------------------------------------------------ 微信绑定线
+    #
+    # S1 已上线（/api/account/v1/wechat-binding*，health 声明
+    # pc_binding_contract=1.3.0）。绑定数据权威在通知服务 pc-bindings，
+    # 账号服务经桥转接；端侧只做 L1 体验层（REQ-20261021-001 方案A）。
+    # 绑定与通知开关分离（方案A §4）：state 不看 notification_opt_in。
+
+    def ensure_binding_ready(self):
+        """绑定能力门控：health 未声明 pc_binding_contract=1.3.0 →
+        service_not_ready（与 ensure_pc_auth 同款铁律，不降级不绕过）。"""
+        h = self.health()
+        v = h.get("pc_binding_contract")
+        if v != SUPPORTED_PC_BINDING:
+            raise AccountError("service_not_ready",
+                               f"账号服务暂不支持微信绑定（health 声明 {v!r}）")
+        return h
+
+    def wechat_binding(self):
+        """GET /wechat-binding → 归一 {state: bound|none, opt_in, raw}。
+        bound = identity_verified ∧ relation_active（通知服务口径，
+        与通知开关无关）。"""
+        bearer, _ = self._bearer()
+        if not bearer:
+            raise AccountError("invalid_token", "未登录或会话过期", 401)
+        r = self._request(self.api, "GET", "/wechat-binding", bearer=bearer)
+        b = r.get("binding")
+        if not isinstance(b, dict):
+            return {"state": "none", "opt_in": None, "raw": r}
+        opt = b.get("notification_opt_in")
+        return {"state": "bound" if (b.get("identity_verified")
+                                     and b.get("relation_active")) else "none",
+                "opt_in": opt if isinstance(opt, bool) else None,
+                "raw": r}
+
+    def binding_request(self):
+        """POST /wechat-binding/requests → {request_id, scan_url,
+        pairing_code, expires_at, state}。服务端自动作废同用户先前 pending
+        配对；二维码 TTL 300s，过期重新生成。"""
+        bearer, _ = self._bearer()
+        if not bearer:
+            raise AccountError("invalid_token", "未登录或会话过期", 401)
+        return self._request(self.api, "POST", "/wechat-binding/requests",
+                             {}, bearer=bearer)
+
+    def binding_lookup(self, request_id):
+        """GET /wechat-binding/requests/<id> → 配对状态
+        （pending/scanned/verifying/awaiting_pc/confirmed/expired/cancelled）。"""
+        bearer, _ = self._bearer()
+        if not bearer:
+            raise AccountError("invalid_token", "未登录或会话过期", 401)
+        from urllib.parse import quote
+        return self._request(self.api, "GET", "/wechat-binding/requests/"
+                             + quote(request_id, safe=""), bearer=bearer)
+
+    def binding_confirm(self, request_id):
+        """POST .../confirm：微信侧核验完成（awaiting_pc）后本机收口；
+        服务端复核客户关系后落绑定。"""
+        bearer, _ = self._bearer()
+        if not bearer:
+            raise AccountError("invalid_token", "未登录或会话过期", 401)
+        from urllib.parse import quote
+        return self._request(self.api, "POST", "/wechat-binding/requests/"
+                             + quote(request_id, safe="") + "/confirm",
+                             {}, bearer=bearer)
+
+    def binding_cancel(self, request_id):
+        """POST .../cancel：作废本机 pending 配对（关窗清理用，失败可静默
+        ——服务端也会在下次 create 时自动作废）。"""
+        bearer, _ = self._bearer()
+        if not bearer:
+            raise AccountError("invalid_token", "未登录或会话过期", 401)
+        from urllib.parse import quote
+        return self._request(self.api, "POST", "/wechat-binding/requests/"
+                             + quote(request_id, safe="") + "/cancel",
+                             {}, bearer=bearer)
+
+    def prerequisites(self):
+        """三前置看板数据（方案A L1 体验层，登录∧权益∧绑定）。member/
+        binding 缺失 = None（未知，服务端未返回或网络失败）——L1 不是安全
+        边界，未知不拦截、不缓存，权威判断在 C2S-12 服务端受理。"""
+        out = {"logged_in": False, "member": None, "binding": None}
+        bearer, _ = self._bearer()
+        out["logged_in"] = bool(bearer)
+        if not bearer:
+            return out
+        try:
+            s = self.me_summary()
+            out["member"] = s["membership_active"]
+            out["binding"] = s["binding_state"]   # /me 已扩展则单次取齐
+        except AccountError:
+            pass
+        if out["binding"] is None:                # /me 未扩展 → 既有绑定端点
+            try:
+                out["binding"] = self.wechat_binding()["state"]
+            except AccountError:
+                pass
+        return out

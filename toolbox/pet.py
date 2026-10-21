@@ -350,14 +350,31 @@ class PetWindow(tk.Tk):
         self.plab = tk.Label(f, text="", bg=C["bg"], fg=C["dim"],
                              font=(FONT, 9), anchor="w")
         # 账号行（契约 §4A；服务未就绪时登录窗如实提示，不降级不绕过）
-        acct = ttk.Frame(f)
-        acct.pack(fill="x", pady=(0, 2))
+        # + 三前置看板（REQ-20261021-001 规则1/方案A L1：登录∧权益∧微信，
+        #   缺项引导绑定；权威判断在 C2S-12 服务端，此处只管体验）
+        acctbox = ttk.Frame(f)
+        acctbox.pack(fill="x", pady=(0, 2))
+        acct = ttk.Frame(acctbox)
+        acct.pack(fill="x")
         self.acct_lab = tk.Label(acct, text="账号：未登录", bg=C["bg"],
                                  fg=C["dim"], font=(FONT, 9), anchor="w")
         self.acct_lab.pack(side="left", fill="x", expand=True)
         self.acct_btn = ttk.Button(acct, text="登录", width=7,
                                    command=self._acct_click)
         self.acct_btn.pack(side="right")
+        self.pre_row = ttk.Frame(acctbox)   # 未登录/内部机不占行（render 控制）
+        self.pre_labs = {}
+        for key, txt in (("login", "登录"), ("member", "权益"),
+                         ("bind", "微信")):
+            lab = tk.Label(self.pre_row, text=txt, bg=C["bg"], fg=C["dim"],
+                           font=(FONT, 9))
+            lab.pack(side="left", padx=(0, 10))
+            self.pre_labs[key] = lab
+        tk.Label(self.pre_row, text="生产前置", bg=C["bg"], fg=C["dim"],
+                 font=(FONT, 8)).pack(side="right")
+        self.bind_btn = ttk.Button(self.pre_row, text="去绑定", width=7,
+                                   command=self._bind_click)
+        self.bind_btn.pack(side="right", padx=(0, 6))
         # 目录监控已退后台日任务（REQ-20261019-013）：不再有监控行，
         # 目录经 config folder_watch.watch_dir 配置，每日一轮自动跑链
         self.status_lab = tk.Label(f, text="", bg=C["bg"], fg=C["dim"],
@@ -433,6 +450,62 @@ class PetWindow(tk.Tk):
         else:
             self.acct_lab.config(text="账号：未登录", fg=C["dim"])
             self.acct_btn.config(text="登录")
+        self._prereq_refresh()
+
+    # ---------- 三前置看板（REQ-20261021-001 规则1/方案A L1 体验层）
+    #
+    # 登录（本地会话可判）/权益/微信（服务端字段，缺失=未知「·」不臆断）。
+    # 「去绑定」仅在明确未绑定时出现；绑定完成后自动补跑当日生产
+    # （daily 未标记 ran_today，10 分钟粒度重检）。权威在 C2S-12 服务端。
+
+    def _prereq_refresh(self):
+        """后台取数 → 主线程渲染；任何失败只收敛为「未知」，不杀窗。"""
+        from toolbox.account import AccountClient
+        api, prod = self._acct_cfg()
+        if not api:
+            return
+
+        def run():
+            pre = None
+            try:
+                pre = AccountClient(api, prod).prerequisites()
+            except Exception:                  # noqa: BLE001
+                pre = None
+            self.after(0, lambda p=pre: self._prereq_render(p or {}))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _prereq_render(self, pre):
+        mark = {True: ("✓", "good"), False: ("✗", "bad"),
+                None: ("·", "dim")}
+        api, _ = self._acct_cfg()
+        if not api or not pre.get("logged_in"):
+            self.pre_row.pack_forget()
+            return
+        binding = pre.get("binding")
+        cells = (("login", pre.get("logged_in")),
+                 ("member", pre.get("member")),
+                 ("bind", {"bound": True, "none": False}.get(binding)))
+        for key, val in cells:
+            glyph, color = mark[val]
+            name = {"login": "登录", "member": "权益", "bind": "微信"}[key]
+            self.pre_labs[key].config(
+                text=f"{name}{glyph}", fg=C[color])
+        if binding == "none":                  # 仅明确未绑定才给入口
+            self.bind_btn.pack(side="right", padx=(0, 6))
+        else:
+            self.bind_btn.pack_forget()
+        if not self.pre_row.winfo_ismapped():
+            self.pre_row.pack(fill="x", pady=(2, 0))
+
+    def _bind_click(self):
+        from toolbox.binding_ui import binding_dialog
+        api, prod = self._acct_cfg()
+        try:
+            binding_dialog(self, api, prod)
+        except Exception as e:                  # noqa: BLE001 绑定失败不杀主窗
+            LOG.warning("绑定对话框异常：%s", e)
+            self._flash("绑定流程异常，请稍后再试", C["warn"])
+        self._prereq_refresh()
 
     # ---------- 目录监控（后台日任务，REQ-20261019-013）
     #
@@ -466,18 +539,46 @@ class PetWindow(tk.Tk):
             now = datetime.datetime.now()
             ran_today = fw.last_daily_run() == now.date().isoformat()
             if not ran_today and now.hour >= hour:
-                LOG.info("后台日任务开始：%s", wdir)
-                try:
-                    n_ok, n_fail = self._daily_pass(wdir)
-                    LOG.info("后台日任务完成：成功 %d / 失败 %d", n_ok, n_fail)
-                    if n_ok or n_fail:
-                        self.after(0, lambda ok=n_ok, fl=n_fail: self._flash(
-                            f"后台处理完成：成{ok} 败{fl}（详见 pet.log）",
-                            C["warn"] if fl else C["dim"]))
-                except Exception as e:          # noqa: BLE001 单日失败不杀线程
-                    LOG.warning("后台日任务失败：%s", e)
-                fw.mark_daily_run()
+                # L1 预检（方案A §2）：明确未绑定 → 暂缓本轮不发请求；
+                # 不标 ran_today，绑定完成后 10 分钟内自动补跑。
+                why = self._bind_gate()
+                if why:
+                    LOG.warning("后台日任务暂缓：%s", why)
+                    self.after(0, lambda w=why: self._flash(
+                        f"生产前置未满足：{w}", C["warn"]))
+                else:
+                    LOG.info("后台日任务开始：%s", wdir)
+                    try:
+                        n_ok, n_fail = self._daily_pass(wdir)
+                        LOG.info("后台日任务完成：成功 %d / 失败 %d",
+                                 n_ok, n_fail)
+                        if n_ok or n_fail:
+                            self.after(0, lambda ok=n_ok, fl=n_fail:
+                                       self._flash(
+                                           f"后台处理完成：成{ok} 败{fl}"
+                                           "（详见 pet.log）",
+                                           C["warn"] if fl else C["dim"]))
+                    except Exception as e:      # noqa: BLE001 单日失败不杀线程
+                        LOG.warning("后台日任务失败：%s", e)
+                    fw.mark_daily_run()
             self.daily_stop.wait(timeout=600)   # 10 分钟粒度检查当日是否到期
+
+    def _bind_gate(self):
+        """L1 绑定预检：仅当「明确未绑定」（wechat-binding 返回 none）拦下；
+        未知（服务端未返回/网络失败/未登录）不拦——登录门控由识别链路
+        require_login 负责（REQ-20260919-013），权威判断在 C2S-12 服务端。
+        返回暂缓原因文案或 ""。"""
+        api, prod = self._acct_cfg()
+        if not api:
+            return ""                            # 内部机不门控
+        from toolbox.account import AccountClient
+        try:
+            pre = AccountClient(api, prod).prerequisites()
+        except Exception:                        # noqa: BLE001 预检失败放行
+            return ""
+        if pre.get("logged_in") and pre.get("binding") == "none":
+            return "微信未绑定（主窗「去绑定」完成后自动补跑）"
+        return ""
 
     def _daily_pass(self, wdir):
         """跑完当前全部就绪任务（顺序，单日上限 100 保护）。"""

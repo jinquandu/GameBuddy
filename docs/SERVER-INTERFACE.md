@@ -469,6 +469,21 @@ POST /api/account/v1/login    {"challenge_id":"…","code":"…","client":"pc",
   已绑其他设备 → 409 device_bound（附现绑设备摘要）
 ```
 
+**`/me` 会话信息（既有端点，形状随本节细则补录；`entitlements`/`binding`
+为兼容性新增字段，1.4.0 服务可缺省）**：
+
+```
+GET /api/account/v1/me（签名头 + 账号 Bearer）
+→ 200 {"user_id":"dsj_…","phone":"138****0000",
+       "entitlements":{ "membership_active":true,
+                        "membership_expires_at":1763500800 },
+       "binding":{ "state":"bound" }}    // entitlements/binding 可缺省
+```
+
+`binding.state` ∈ `bound|none`（pending 配对视同 `none`）；字段缺失 =
+「未知」——端侧容错展示、不缓存（总则 #4），生产受理的权威判断在
+C2S-12 服务端（REQ-20261021-001 方案A：L1 体验层只做引导）。
+
 **C2S-12 production-jobs 请求体**（签名头 + 账号 Bearer）：
 
 ```
@@ -510,9 +525,18 @@ POST /api/account/v1/login    {"challenge_id":"…","code":"…","client":"pc",
 - `POST /api/account/v1/production-jobs`：入参 = 上传回执（upload_id/
   receipt 引用）、`request_id`、允许的制作参数（候选数量等由服务端
   权益决定，PC 不得自报额度）。
-- 账号侧受理：核验有效设备与权益 → 经 INT-3 确认上传归属且 complete
-  → 按 `(user_id, request_id)` 幂等预留业务 job_id → 经 INT-2 提交
-  生产 → 返回 job_id 与状态。失败可幂等重试，不留「已提交」假状态。
+- 账号侧受理：核验有效设备与权益 → **绑定核验（见下）** → 经 INT-3
+  确认上传归属且 complete → 按 `(user_id, request_id)` 幂等预留业务
+  job_id → 经 INT-2 提交生产 → 返回 job_id 与状态。失败可幂等重试，
+  不留「已提交」假状态。
+- **绑定核验细则（2026-10-21 补录，REQ-20261021-001 规则1/方案A）**：
+  受理事务内现查该 user_id 的有效微信绑定（经通知服务 pc-bindings
+  桥，授权不缓存），未绑定 → **`403 binding_required`**（C2S-12 专属
+  错误码，端侧收到后引导用户完成绑定再重试）。语义：①pending 配对
+  视同未绑定；②绑定与通知开关分离——只看绑定存在性，不看
+  `notification_opt_in`；③已受理/执行中任务不因解绑中止，仅拒绝新
+  申请；④换绑窗口内无有效绑定同样拒绝，重绑后恢复。PC 端三前置
+  看板（登录∧权益∧绑定）为 L1 体验层，唯一权威在本受理层。
 
 ### C2S-13/14 生产任务查询与受控产物读取（cut_server）
 
@@ -781,6 +805,7 @@ import-session 幂等重跑保留）。
 
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
+| 2026-10-21 | 1.4.0（细则补录） | §4A C2S-12 / `/me` | 微信绑定三前置（REQ-20261021-001 规则1，方案A）：C2S-12 新增专属错误码 **`403 binding_required`** 与受理绑定核验细则（受理事务内现查 pc-bindings 桥、pending 视同未绑定、通知开关≠解绑、已受理任务不因解绑中止、换绑窗口拒绝新申请）；`/me` 形状首次补录并新增可缺省字段 `entitlements`/`binding.state`（端侧容错展示不缓存，权威判断在 C2S-12 受理层）。冻结接口形状/编号未变，CONTRACT_VERSION 不变 | [REQ-20261021-001](../cut_kb/需求/REQ-20261021-001-权益与每日生产规则.md)、[方案A](../cut_kb/想法/IDEA-20261019-006-方案A-微信绑定强制.md) |
 | 2026-10-19 | 1.3.0 | C2S-6~9 / SRV-4 / §2.1 | 兼容性新增：受控 HTTPS 上传通道（`https://95188.pw/api/production/v1`，Bearer 租户 token，tenant 服务端解出、路径白名单、SHA-256 复核、分块断点续传、complete 自动 import/eval）；config 新增 `server.upload_url`/`upload_token`（非空即 HTTPS 通道，客户分发包不再携带 ssh 私钥/rsync）；rsync 通道保留内部机用，行为不变。接口形状对齐 REQ-20261019-003 拟议的 `/api/production/v1`，统一账号上线后仅替换鉴权层（REQ-20261019-005） |
 | 2026-10-19 | 1.4.0（冻结） | §4A / C2S-10~14 / INT-1~3 | **接口定义冻结（按用户指示，冻结≠实施，线上契约仍 1.3.0，CONTRACT_VERSION 随双端实施发版升至 1.4.0）**；冻结后接口形状/编号/错误语义不再可改，变更须走 §0 版本纪律。同时落实端侧三条评审意见：①总则 #6 明确错误码清单为公共子集、接口专属码（如 409 device_bound）以各节为准；②INT-3 增归属落盘细则（账号鉴权实施起 create 的 meta.json/receipts 增记 owner user_id）；③确认投稿/收片接口有意后置（C2S-15 起另行起草，关联 REQ-004），非本节遗漏 |
 | 2026-10-19 | 1.3.1（勘误） | §5.1 | events.jsonl loadout 历史数据形态勘误：2026-09 及更早场次实测存在 weapons=[{name,type,reads}]（dict 列表）第三形态，消费方须容错 [str]/[dict]/缺失（dict 取 name，hero 同理）。源出联调实测：旧场次 push --run-eval 时服务端 report.py join 崩溃（REQ-20261019-006）。纯文档勘误，CONTRACT_VERSION 常量不变 | 
