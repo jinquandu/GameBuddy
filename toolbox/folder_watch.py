@@ -28,6 +28,9 @@ from toolbox.config import DATA, ROOT, load_config
 
 QUEUE_FILE = DATA / ".folder_watch.json"
 VIDEO_EXTS = {".mp4", ".flv", ".ts", ".mkv", ".mov"}
+SCAN_DEPTH = 3        # 监控根下递归深度上限（REQ-20261021-004）：目标目录
+                      # 最深=监控根/x/y/（二级场次，如 根/<游戏>/<场次>/），
+                      # 再深不扫——防误扫用户整盘；只看根直下=旧行为
 
 
 def _cfg():
@@ -68,11 +71,31 @@ def job_key(p: Path):
     return h.hexdigest()
 
 
-def _videos_in(target: Path):
+def _videos_in(target: Path, depth=SCAN_DEPTH):
+    """目标内视频文件：目录时递归发现（深度上限 depth，REQ-20261021-004
+    二级嵌套支持——场次目录可在监控根下一级或二级；0 层 = 仅直下文件，
+    与旧行为一致）。"""
     if target.is_file():
         return [target] if target.suffix.lower() in VIDEO_EXTS else []
-    return sorted(p for p in target.iterdir()
-                  if p.is_file() and p.suffix.lower() in VIDEO_EXTS)
+
+    def walk(d: Path, level):
+        out = []
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            return out
+        for p in entries:
+            try:
+                if p.is_file():
+                    if p.suffix.lower() in VIDEO_EXTS:
+                        out.append(p)
+                elif p.is_dir() and level < depth:
+                    out.extend(walk(p, level + 1))
+            except OSError:
+                continue
+        return out
+
+    return walk(target, 0)
 
 
 def _stable(target: Path, stable_sec: int, now=None):
@@ -92,7 +115,11 @@ def _stable(target: Path, stable_sec: int, now=None):
 
 
 def scan(watch_dir, state=None):
-    """稳定目标入队（幂等）。返回本次新入队数。"""
+    """稳定目标入队（幂等）。返回本次新入队数。
+
+    目标发现递归（REQ-20261021-004）：监控根下走有界深度优先，「目标」=
+    含视频的最深目录（场次目录可在一/二级）或根直下散装视频；一个子树
+    只出一个目标（以最深含视频目录为准），上层包装目录不重复入队。"""
     wd = Path(watch_dir)
     if not wd.is_dir():
         return 0
@@ -100,28 +127,60 @@ def scan(watch_dir, state=None):
     cfg = _cfg()
     stable_sec = int(cfg.get("stable_min", 10)) * 60
     new = 0
-    for entry in sorted(wd.iterdir()):
-        target = None
-        if entry.is_dir():
-            vids = _videos_in(entry)
-            if vids and _stable(entry, stable_sec):
-                target = entry
-        elif entry.suffix.lower() in VIDEO_EXTS and _stable(entry, stable_sec):
-            target = entry
-        if target is None:
-            continue
+
+    def try_enqueue(target):
+        nonlocal new
         try:
             key = job_key(target)
         except OSError:
-            continue
+            return
         if key in state["jobs"]:
-            continue                       # 去重：任何状态都不重复入队
+            return                         # 去重：任何状态都不重复入队
         state["jobs"][key] = {
             "key": key, "path": str(target),
             "session": target.stem if target.is_file() else target.name,
             "state": "queued", "attempts": 0,
             "enqueued_at": _now(), "updated_at": _now(), "note": ""}
         new += 1
+
+    def walk(entry, level):
+        """返回 True=本子树已产出/包含目标（上层不再处理）。
+        level: 根直下条目=0;目标（场次目录）最深=SCAN_DEPTH-1 层
+        （SCAN_DEPTH=3 → 根/a/b/ 二级嵌套）；散装文件限根直下。"""
+        if entry.is_file():
+            if level == 0 and entry.suffix.lower() in VIDEO_EXTS and \
+                    _stable(entry, stable_sec):
+                try_enqueue(entry)
+                return True
+            return False
+        if not entry.is_dir():
+            return False
+        # 先探更深一层：子树里能找到目标则本目录只是包装层
+        if level < SCAN_DEPTH - 1:
+            try:
+                subs = sorted(p for p in entry.iterdir()
+                              if p.is_dir() and not p.name.startswith("."))
+            except OSError:
+                subs = []
+            handled = any(walk(s, level + 1) for s in subs)
+            if handled:
+                return True
+        if level >= SCAN_DEPTH - 1:
+            return False                    # 超出最深目标层（防误扫整盘）
+        vids = _videos_in(entry, depth=0)   # 只看本目录直下文件
+        if vids and _stable(entry, stable_sec):
+            try_enqueue(entry)
+            return True
+        return False
+
+    try:
+        roots = sorted(wd.iterdir())
+    except OSError:
+        return 0
+    for entry in roots:
+        if entry.name.startswith("."):
+            continue
+        walk(entry, 0)                     # 根直下散装视频/一二级目录
     if new:
         _save(state)
     return new

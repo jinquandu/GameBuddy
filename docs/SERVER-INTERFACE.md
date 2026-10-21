@@ -211,7 +211,12 @@ python -m toolbox push <场次> --mode video
 ### C2S-3 manifest 上报
 
 - 文件：`<租户根>/sessions/<场次>/manifest.json`，schema 见 §5.2；
-- `contract_version` 字段标识端侧契约版本（§0.4）。
+- `contract_version` 字段标识端侧契约版本（§0.4）；
+- **端侧日志随包（1.3.2 补录，REQ-20261021-004）**：eval 包的文件清单可含
+  `sessions/<场次>/logs/<pet|account|pipeline>-YYYYMMDD.log`（尾部 512KB
+  快照，同日重跑覆盖同名）；服务端 HTTPS 通道须放行该前缀（现状 400
+  invalid_path，放行属服务端配合项），rsync 通道无白名单天然可用；
+  manifest 增可选键 `logs`（文件名列表），服务端不强制消费。
 
 ### C2S-4 / C2S-5 远端触发
 
@@ -681,6 +686,7 @@ JSONL，每行一个事件，write-once（文件存在即为完整结论）：
 | `parts` | list | 每分片：`client_video`（端侧绝对路径）、`filename`、`asr_dir`、`events_rpt`（规范 `_full` 名）、`voice_dir?` |
 | `missing` | list[str] | 缺失产物说明（ASR/事件流），打标站如实显示 |
 | `lines` | object | `knockdowns`/`pickups`：目录名或 null；`voice`：目录名列表（`report` 为服务端状态键，见 §5.3，端侧 manifest 不写） |
+| `logs` | list[str]? | 可选（1.3.2 补录）：本次随包上传的端侧日志文件名（`sessions/<场次>/logs/` 下，`pet-YYYYMMDD.log` 式）；服务端不强制消费，import 幂等保留、prune 连带删除 |
 
 ### 5.3 session.json（`sessions/<场次>/`，服务端写）
 
@@ -805,6 +811,7 @@ import-session 幂等重跑保留）。
 
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
+| 2026-10-21 | 1.3.2 | §5.2 / C2S-3 | 兼容性新增（REQ-20261021-004）：manifest 可选键 **`logs`**（本次随包上传的端侧日志文件名列表）+ eval 包文件清单新增前缀 `sessions/<场次>/logs/<name>-YYYYMMDD.log`（尾部 512KB 快照，同日重跑覆盖）。端侧已实现（push 自动携带）；服务端 HTTPS 白名单放行该前缀为配合项待认领（未放行前 complete 报 400 invalid_path，端侧把日志加入清单会失败——放行前端侧不因此重试），rsync 通道天然可用。CONTRACT_VERSION 常量随下次发版同步 1.3.2 | [REQ-20261021-004](../cut_kb/需求/REQ-20261021-004-录像目录二级嵌套支持与本地日志随包上传.md) |
 | 2026-10-21 | 1.4.0（细则补录） | §4A C2S-12 / `/me` | 微信绑定三前置（REQ-20261021-001 规则1，方案A）：C2S-12 新增专属错误码 **`403 binding_required`** 与受理绑定核验细则（受理事务内现查 pc-bindings 桥、pending 视同未绑定、通知开关≠解绑、已受理任务不因解绑中止、换绑窗口拒绝新申请）；`/me` 形状首次补录并新增可缺省字段 `entitlements`/`binding.state`（端侧容错展示不缓存，权威判断在 C2S-12 受理层）。冻结接口形状/编号未变，CONTRACT_VERSION 不变 | [REQ-20261021-001](../cut_kb/需求/REQ-20261021-001-权益与每日生产规则.md)、[方案A](../cut_kb/想法/IDEA-20261019-006-方案A-微信绑定强制.md) |
 | 2026-10-19 | 1.3.0 | C2S-6~9 / SRV-4 / §2.1 | 兼容性新增：受控 HTTPS 上传通道（`https://95188.pw/api/production/v1`，Bearer 租户 token，tenant 服务端解出、路径白名单、SHA-256 复核、分块断点续传、complete 自动 import/eval）；config 新增 `server.upload_url`/`upload_token`（非空即 HTTPS 通道，客户分发包不再携带 ssh 私钥/rsync）；rsync 通道保留内部机用，行为不变。接口形状对齐 REQ-20261019-003 拟议的 `/api/production/v1`，统一账号上线后仅替换鉴权层（REQ-20261019-005） |
 | 2026-10-19 | 1.4.0（冻结） | §4A / C2S-10~14 / INT-1~3 | **接口定义冻结（按用户指示，冻结≠实施，线上契约仍 1.3.0，CONTRACT_VERSION 随双端实施发版升至 1.4.0）**；冻结后接口形状/编号/错误语义不再可改，变更须走 §0 版本纪律。同时落实端侧三条评审意见：①总则 #6 明确错误码清单为公共子集、接口专属码（如 409 device_bound）以各节为准；②INT-3 增归属落盘细则（账号鉴权实施起 create 的 meta.json/receipts 增记 owner user_id）；③确认投稿/收片接口有意后置（C2S-15 起另行起草，关联 REQ-004），非本节遗漏 |

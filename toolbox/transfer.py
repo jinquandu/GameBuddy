@@ -45,7 +45,7 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 # 分块续传、complete 自动 import；REQ-20261019-005）；
 # 1.2.0：events.jsonl kind=loadout 补 meta.hero/weapons（REQ-20261014-002）；
 # 1.1.2/1.1.3 为逐场报告线补录与 site_url 迁移（2026-10-14 并轨编号，见 §8）。
-CONTRACT_VERSION = "1.3.0"
+CONTRACT_VERSION = "1.3.2"
 
 
 # ---------------------------------------------------------------- 会话发现
@@ -444,7 +444,7 @@ def _excluded(rel_posix, excludes):
     return False
 
 
-def _plan_files(disc, mode):
+def _plan_files(disc, mode, log_dir=None):
     """把一次 push 的内容枚举成 HTTPS 上传清单：返回 (files, local_map,
     manifest)。files=[(租户根相对路径, size, sha256)] 只含数据/源片文件；
     manifest 走 complete 请求体由服务端落盘（重跑时 pushed_at 变化不破坏
@@ -490,8 +490,12 @@ def _plan_files(disc, mode):
             add_dir(v, f"data/voice/{v.name}", EVAL_EXCLUDES["voice"])
         if not files:
             raise RuntimeError("没有可上传的产物")
+        log_files, log_map, log_names = _collect_logs(disc, logs_dir=log_dir)
+        files.extend(log_files)
+        local_map.update(log_map)
 
-    return files, local_map, _build_manifest(disc, mode)
+    return files, local_map, _build_manifest(
+        disc, mode, logs=log_names if mode != "video" else None)
 
 
 def _push_https(cfg, session, mode, dry, run_eval, no_import, tenant_override):
@@ -545,9 +549,54 @@ def _push_https(cfg, session, mode, dry, run_eval, no_import, tenant_override):
             "数据已在服务端，重跑本命令可重试 import")
 
 
-def _build_manifest(disc, mode):
-    """manifest.json 内容（rsync 与 HTTPS 两通道共用，schema 见契约 §5.2）。"""
-    return {
+def _collect_logs(disc, tail_bytes=512 * 1024, logs_dir=None):
+    """端侧日志尾部快照 → (files, local_map, names)（REQ-20261021-004②）。
+
+    取 logs_dir（缺省 DATA/logs）下 {pet,account,pipeline}.log 尾部
+    tail_bytes 字节（排障足够且防清单/上传时长爆炸），落临时文件
+    `pet-YYYYMMDD.log` 式带日期名；同场次重跑覆盖同名（服务端幂等）。
+    日志自身已脱敏（账号日志铁律），不做二次处理。仅 eval 模式携带
+    （调用方 _plan_files 把关）。"""
+    import tempfile
+    from toolbox.uploader import file_sha256
+    from toolbox.config import DATA
+    base = Path(logs_dir) if logs_dir else DATA / "logs"
+    src = {"pet": base / "pet.log",
+           "account": base / "account.log",
+           "pipeline": base / "pipeline.log"}
+    out_files, out_map, names = [], {}, []
+    stamp = datetime.now().strftime("%Y%m%d")
+    tmpdir = Path(tempfile.mkdtemp(prefix="dsj-logs-"))
+    for key, p in src.items():
+        if not p.is_file() or p.stat().st_size == 0:
+            continue
+        try:
+            with p.open("rb") as f:
+                size = p.stat().st_size
+                f.seek(max(0, size - tail_bytes))
+                blob = f.read()
+            if size > tail_bytes:               # 掐到行首（半行 ASCII/CJK 混合
+                nl = blob.find(b"\n")           # 直接丢首半行即可）
+                blob = blob[nl + 1:] if nl >= 0 else blob
+            if not blob.strip():
+                continue
+            name = f"{key}-{stamp}.log"
+            local = tmpdir / name
+            local.write_bytes(blob)
+            rel = f"sessions/{disc['session']}/logs/{name}"
+            out_files.append([rel, local.stat().st_size,
+                              file_sha256(local)])
+            out_map[rel] = local
+            names.append(name)
+        except OSError:
+            continue                            # 单日志失败不拦 push
+    return out_files, out_map, names
+
+
+def _build_manifest(disc, mode, logs=None):
+    """manifest.json 内容（rsync 与 HTTPS 两通道共用，schema 见契约 §5.2）。
+    logs=本次上传的日志文件名列表（可选键，REQ-20261021-004②）。"""
+    out = {
         "contract_version": CONTRACT_VERSION,
         "session": disc["session"],
         "mode": mode,
@@ -560,6 +609,9 @@ def _build_manifest(disc, mode):
             "voice": [v.name for v in disc["voice_dirs"]],
         },
     }
+    if logs:
+        out["logs"] = list(logs)
+    return out
 
 
 def _write_manifest(alias, remote, disc, mode, dry=False):
