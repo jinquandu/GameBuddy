@@ -78,14 +78,20 @@ try:
     win.update()
     win._render()                      # 手动渲染一帧（状态行刷新）
     win.update()
-    check("素朴主界面：地址框+主按钮映射中",
-          bool(win.addr_cb.winfo_ismapped()) and bool(win.btn.winfo_ismapped()))
+    check("素朴主界面：目录框+主按钮映射中",
+          bool(win.addr_ent.winfo_ismapped()) and bool(win.btn.winfo_ismapped()))
     check("主按钮文案", "开始跑链" in win.btn.cget("text"))
     # 地址校验分支（不真正起子进程）
     win.addr_var.set("")
     win._toggle_run()
     win.update()
-    check("空地址提示", "地址" in win._status_text)
+    check("空地址提示", "目录" in win._status_text)
+    # BV/URL 拒入（IDEA-003 目录唯一入口）：异常简短提示、不起子进程
+    win.addr_var.set("BV1xx411c7mD")
+    win._toggle_run()
+    win.update()
+    check("BV/URL 拒入提示", "仅支持本地录像目录" in win._status_text
+          and (win.proc is None))
     # 最小化 -> 托盘（withdraw，任务栏不占位）-> 恢复
     win.iconify()
     win.update()

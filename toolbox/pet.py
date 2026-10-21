@@ -336,14 +336,15 @@ class PetWindow(tk.Tk):
     def _build(self):
         f = ttk.Frame(self, padding=(12, 10))
         f.pack(fill="both", expand=True)
-        ttk.Label(f, text="录像地址（BV号 / URL / 场次目录）").pack(anchor="w")
+        # 录像目录=唯一选择入口（IDEA-003/REQ-20261021-001：仅本地目录，
+        # 去 BV/URL——内部联调走 CLI toolbox pipeline；选择即监控目录）
+        ttk.Label(f, text="录像目录（本地文件夹，后台自动扫描）").pack(anchor="w")
         row = ttk.Frame(f)
         row.pack(fill="x", pady=(2, 8))
         self.addr_var = tk.StringVar()
-        self.addr_cb = ttk.Combobox(row, textvariable=self.addr_var,
-                                    values=self._load_hist()["addresses"])
-        self.addr_cb.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="浏览…", width=7,
+        self.addr_ent = ttk.Entry(row, textvariable=self.addr_var)
+        self.addr_ent.pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="选择…", width=7,
                    command=self._browse).pack(side="left", padx=(6, 0))
         self.btn = ttk.Button(f, text="▶  开始跑链",
                               command=self._on_main_button)
@@ -533,62 +534,63 @@ class PetWindow(tk.Tk):
         import toolbox.folder_watch as fw
         from toolbox.config import load_config
         cfg = load_config().get("folder_watch") or {}
-        wdir = cfg.get("watch_dir") or self.watch_dir
-        if not wdir:
-            LOG.info("后台日任务未配置目录（folder_watch.watch_dir），不启动")
-            return
         hour = int(cfg.get("daily_hour", 4))
         scan_min = int(cfg.get("scan_interval_min", 120))
-        LOG.info("后台日任务就绪：%s（每 %d 分钟扫描入队；生产=每日 %02d:00 "
-                 "或开机补跑，滚动 24h 一次，近 24h 新增>%.0fGB 触发）",
-                 wdir, scan_min, hour, float(cfg.get("threshold_gb", 2)))
+        LOG.info("后台日任务就绪（每 %d 分钟扫描入队；生产=每日 %02d:00 "
+                 "或开机补跑，滚动 24h 一次，近 24h 新增>%.0fGB 触发；"
+                 "未配置目录则等待选择）",
+                 scan_min, hour, float(cfg.get("threshold_gb", 2)))
         boot = {"done": False}      # 开机补跑时刻只查一次（规则 4）
         next_scan = 0.0             # 首 tick 即扫（开机补扫停机期间稳定的）
         while not self.daily_stop.is_set():
-            # ① 扫描节拍（每 2h，稳定入队；扫描≠生产——规则 2）
-            if time.time() >= next_scan:
-                try:
-                    new = fw.scan(wdir)
-                    if new:
-                        LOG.info("扫描入队：%d 个新目标", new)
-                except Exception as e:          # noqa: BLE001 扫描失败不杀线程
-                    LOG.warning("扫描失败：%s", e)
-                next_scan = time.time() + scan_min * 60
-            # ② 生产判定（滚动 24h 窗口 + 阈值严格 >，规则 3/4/5）
-            due, why = fw.production_due(hour, boot=not boot["done"])
-            if due:
-                boot["done"] = True
-                # L1 预检（方案A §2）：明确未绑定 → 暂缓不记生产窗口，
-                # 绑定完成后窗口内自动重试（10 分钟粒度）
-                gate = self._bind_gate()
-                if gate:
-                    LOG.warning("生产暂缓：%s", gate)
-                    self.after(0, lambda g=gate: self._flash(
-                        f"生产前置未满足：{gate}", C["warn"]))
-                else:
-                    added = fw.new_recordings_bytes(wdir)
-                    limit = fw.threshold_bytes()
-                    if added > limit:           # 严格 >（等于/低于不启动）
-                        LOG.info("生产开始（%s）：近 24h 新增 %.2fGB > "
-                                 "%.0fGB", why, added / 1e9, limit / 1e9)
-                        try:
-                            n_ok, n_fail = self._daily_pass(wdir)
-                            LOG.info("生产完成：成功 %d / 失败 %d",
-                                     n_ok, n_fail)
-                            if n_ok or n_fail:
-                                self.after(0, lambda ok=n_ok, fl=n_fail:
-                                           self._flash(
-                                               f"后台处理完成：成{ok} 败{fl}"
-                                               "（详见 pet.log）",
-                                               C["warn"] if fl else C["dim"]))
-                        except Exception as e:  # noqa: BLE001 单轮失败不杀线程
-                            LOG.warning("生产失败：%s", e)
+            # 目录唯一入口（IDEA-003）可运行中改选：每拍重读，10 分钟内接管
+            wdir = (load_config().get("folder_watch") or {}).get(
+                "watch_dir") or self.watch_dir
+            if wdir:
+                # ① 扫描节拍（每 2h，稳定入队；扫描≠生产——规则 2）
+                if time.time() >= next_scan:
+                    try:
+                        new = fw.scan(wdir)
+                        if new:
+                            LOG.info("扫描入队：%d 个新目标", new)
+                    except Exception as e:          # noqa: BLE001 扫描失败不杀线程
+                        LOG.warning("扫描失败：%s", e)
+                    next_scan = time.time() + scan_min * 60
+                # ② 生产判定（滚动 24h 窗口 + 阈值严格 >，规则 3/4/5）
+                due, why = fw.production_due(hour, boot=not boot["done"])
+                if due:
+                    boot["done"] = True
+                    # L1 预检（方案A §2）：明确未绑定 → 暂缓不记生产窗口，
+                    # 绑定完成后窗口内自动重试（10 分钟粒度）
+                    gate = self._bind_gate()
+                    if gate:
+                        LOG.warning("生产暂缓：%s", gate)
+                        self.after(0, lambda g=gate: self._flash(
+                            f"生产前置未满足：{gate}", C["warn"]))
                     else:
-                        # 规则 5：无新录像/不足阈值不生产，当日权益照算
-                        LOG.info("生产跳过（%s）：近 24h 新增 %.2fGB ≤ "
-                                 "%.0fGB，当日权益照算", why, added / 1e9,
-                                 limit / 1e9)
-                    fw.mark_production_run()   # 生产时刻消耗（含跳过）
+                        added = fw.new_recordings_bytes(wdir)
+                        limit = fw.threshold_bytes()
+                        if added > limit:           # 严格 >（等于/低于不启动）
+                            LOG.info("生产开始（%s）：近 24h 新增 %.2fGB > "
+                                     "%.0fGB", why, added / 1e9, limit / 1e9)
+                            try:
+                                n_ok, n_fail = self._daily_pass(wdir)
+                                LOG.info("生产完成：成功 %d / 失败 %d",
+                                         n_ok, n_fail)
+                                if n_ok or n_fail:
+                                    self.after(0, lambda ok=n_ok, fl=n_fail:
+                                               self._flash(
+                                                   f"后台处理完成：成{ok} 败{fl}"
+                                                   "（详见 pet.log）",
+                                                   C["warn"] if fl else C["dim"]))
+                            except Exception as e:  # noqa: BLE001 单轮失败不杀线程
+                                LOG.warning("生产失败：%s", e)
+                        else:
+                            # 规则 5：无新录像/不足阈值不生产，当日权益照算
+                            LOG.info("生产跳过（%s）：近 24h 新增 %.2fGB ≤ "
+                                     "%.0fGB，当日权益照算", why, added / 1e9,
+                                     limit / 1e9)
+                        fw.mark_production_run()   # 生产时刻消耗（含跳过）
             self.daily_stop.wait(timeout=600)   # 10 分钟粒度复查窗口/绑定门
 
     def _bind_gate(self):
@@ -694,9 +696,24 @@ class PetWindow(tk.Tk):
 
     def _browse(self):
         d = filedialog.askdirectory(initialdir=str(ROOT / "video"),
-                                    title="选择场次目录（含 P1..PN 分片）")
+                                    title="选择录像目录（后台每 2h 自动扫描）")
         if d:
-            self.addr_var.set(str(Path(d)))
+            d = str(Path(d))
+            self.addr_var.set(d)
+            self._set_watch_dir(d)
+
+    def _set_watch_dir(self, d):
+        """所选目录即后台监控目录（唯一入口）：写内存+config 持久保存，
+        日任务循环 10 分钟内接管（IDEA-003 交互细则）。"""
+        if self.watch_dir == d:
+            return
+        self.watch_dir = d
+        try:
+            from toolbox.config import persist_watch_dir
+            persist_watch_dir(d)
+            LOG.info("监控目录已设置：%s", d)
+        except Exception as e:                  # noqa: BLE001 持久化失败不拦选目录
+            LOG.warning("watch_dir 持久化失败（本次运行仍生效）：%s", e)
 
     def _toggle_run(self):
         if self.proc and self.proc.poll() is None:
@@ -704,8 +721,15 @@ class PetWindow(tk.Tk):
             return
         addr = self.addr_var.get().strip()
         if not addr:
-            self._flash("先把录像地址填上呀", C["warn"])
+            self._flash("先选择录像目录", C["warn"])
             return
+        if "://" in addr or addr.upper().startswith("BV"):
+            # 目录唯一入口（IDEA-003）：BV/URL 不进 UI，异常简短提示
+            self._flash("仅支持本地录像目录（BV/URL 请用命令行 toolbox pipeline）",
+                        C["warn"])
+            return
+        if Path(addr).is_dir():
+            self._set_watch_dir(addr)           # 手填目录同样收编为监控目录
         self._start(addr)
 
     def _on_main_button(self):

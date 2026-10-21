@@ -110,6 +110,45 @@ def _merge(base, override):
     return out
 
 
+def persist_watch_dir(d):
+    """把 folder_watch.watch_dir 写入 ROOT/config.yaml（IDEA-003/REQ-20261021-001
+    目录唯一选择入口·持久保存）。保留其余内容与注释：已有 watch_dir 行 →
+    原位换值；节内注释示例行 → 落成真值；有 folder_watch 节无该行 → 插
+    节首；无节 → 追加最小节。路径统一正斜杠并加引号。"""
+    path = ROOT / "config.yaml"
+    quoted = '"' + str(d).replace("\\", "/") + '"'
+    text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
+    out, done, in_fw = [], False, False
+    for ln in text.splitlines():
+        s = ln.rstrip()
+        if s.startswith("folder_watch:"):
+            in_fw = True
+            out.append(s)
+            continue
+        if in_fw:
+            t = s.lstrip()
+            if t.startswith("watch_dir:") and not t.startswith("#"):
+                out.append(s[:len(s) - len(t)] + "watch_dir: " + quoted)
+                done = True
+                continue
+            if t.startswith("# watch_dir"):        # 示例注释行 → 落成真值
+                out.append("  watch_dir: " + quoted)
+                done = True
+                continue
+            if t and not t.startswith("#") and s[:1] not in (" ", "\t"):
+                in_fw = False                       # 节结束（下一个顶层键）
+        out.append(s)
+    if not done:
+        for i, ln in enumerate(out):
+            if ln.startswith("folder_watch:"):
+                out.insert(i + 1, "  watch_dir: " + quoted)
+                done = True
+                break
+        if not done:
+            out += ["", "folder_watch:", "  watch_dir: " + quoted]
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 def _user_config():
     cfg_file = ROOT / "config.yaml"
     if cfg_file.exists():
