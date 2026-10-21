@@ -372,7 +372,7 @@ class PetWindow(tk.Tk):
         self.dir_lab.pack(side="left", fill="x", expand=True)
         ttk.Button(b1, text="更换文件夹", width=11,
                    command=self._browse).pack(side="right")
-        tk.Label(home, text="每 2 小时自动扫描新增录像，稳定后入队待产（扫描≠生产）",
+        tk.Label(home, text="每 2 小时自动检查一次新增录像，稳定后自动为你剪辑",
                  bg=BRAND["page"], fg=C["dim"], font=(FONT, 8),
                  anchor="w").pack(fill="x", padx=18)
 
@@ -407,8 +407,8 @@ class PetWindow(tk.Tk):
         self.works_lab.pack(side="left", fill="x", expand=True)
         ttk.Button(w1, text="打开作品页", width=11,
                    command=self._open_portal).pack(side="right")
-        tk.Label(works, text="每日 3 条候选只选 1 条，确认即锁定不可改选；"
-                             "三选一与发布入口在作品页完成，发布最终由你在抖音确认",
+        tk.Label(works, text="每天最多剪 3 条候选，挑 1 条最好的；选定后当天不能换，"
+                             "发布前最后由你在抖音确认",
                  bg=BRAND["page"], fg=C["dim"], font=(FONT, 8), anchor="w",
                  wraplength=420, justify="left").pack(fill="x", padx=18)
 
@@ -422,7 +422,7 @@ class PetWindow(tk.Tk):
                                    command=self._acct_click)
         self.acct_btn.pack(side="right")
 
-        s2 = self._card(st, "生产前置（缺项不生产）")
+        s2 = self._card(st, "开始剪辑的条件")
         pre_row = tk.Frame(s2, bg=BRAND["card"])
         pre_row.pack(fill="x")
         self.pre_labs = {}
@@ -520,7 +520,7 @@ class PetWindow(tk.Tk):
         sess = AccountClient(api, prod).session_summary()
         if sess:
             if not messagebox.askokcancel("退出登录",
-                                          "退出后当日生产会暂缓，确定退出？"):
+                                          "退出后今天就没办法自动为你剪辑了，确定退出？"):
                 return
             AccountClient(api, prod).logout()
             self._acct_refresh()
@@ -686,9 +686,9 @@ class PetWindow(tk.Tk):
         q = prod.get("summary") or {}
         if q:
             self.queue_lab.config(
-                text=f"待处理 {q.get('queued', 0)} · 进行 {q.get('running', 0)}"
-                     f" · 成功 {q.get('done', 0)}"
-                     f" · 失败 {len(q.get('failed', []))}（详见 pet.log）")
+                text=f"排队 {q.get('queued', 0)} · 处理中 {q.get('running', 0)}"
+                     f" · 完成 {q.get('done', 0)}"
+                     f" · 失败 {len(q.get('failed', []))}")
         if prod.get("wdir"):
             self.works_lab.config(
                 text=self._works_text(prod, q))
@@ -696,33 +696,33 @@ class PetWindow(tk.Tk):
         api, _ = self._acct_cfg()
         badge, detail, act, cmd = "…", "", None, None
         if not prod.get("wdir"):
-            badge, detail = "待选择文件夹", "点「更换文件夹」选定录像目录，后台自动扫描"
+            badge, detail = "选择录像文件夹", "点「更换文件夹」选好目录，之后就全自动了"
         elif api and not pre.get("logged_in"):
-            badge, detail = "未登录", "登录后按规则自动生产（04:00/开机补跑）"
+            badge, detail = "未登录", "登录后就会自动为你剪辑（每天到点自动开始）"
             act, cmd = "去登录", self._acct_click
         elif pre.get("binding") == "none":
-            badge, detail = "微信未绑定", "绑定后当日自动补跑生产"
+            badge, detail = "微信还没绑定", "绑定微信后今天就帮你补上"
             act, cmd = "去绑定", self._bind_click
         elif pre.get("member") is False:
-            badge, detail = "权益未开通", "由后台白名单开通，前台不售卖"
+            badge, detail = "还没有开通权益", "联系大师姐开通，开通后自动生效"
         elif q.get("running"):
-            badge, detail = "生产中…", f"队列进行 {q['running']} 个（完成自动出候选）"
+            badge, detail = "剪辑中…", "正在处理你的录像，完成后自动出候选"
         elif prod.get("last_ts") and prod.get("due") and \
                 not prod["due"][0] and "窗口内已生产" in prod["due"][1]:
             t = time.strftime("%H:%M", time.localtime(prod["last_ts"]))
-            badge, detail = f"今日已生产 {t}", "候选在「我的作品」；窗口内不再重复生产"
+            badge, detail = f"今天已出片 {t}", "候选在「我的作品」；明天还会继续"
             act, cmd = "看作品", lambda: self._nav("works")
         elif prod.get("added") is not None:
             gb = prod["added"] / 1e9
             hit = prod["added"] > prod.get("limit", 2e9)
-            badge = "待生产窗口" if hit else "新增不足"
-            detail = (f"近 24h 新增 {gb:.2f}GB"
-                      + ("（已达标，等待 04:00 或开机补跑）" if hit
-                         else " / 2GB，严格超过才生产；当日权益照算"))
+            badge = "已达标，等自动剪辑" if hit else "录像还不够"
+            detail = (f"最近一天新增录像 {gb:.2f}GB"
+                      + ("，够了！到点自动开始剪辑" if hit
+                         else "，再录一点吧（要超过 2GB 才开始剪）"))
         self.prod_badge.config(text=badge)
-        color = {"未登录": C["bad"], "微信未绑定": C["warn"],
-                 "权益未开通": C["bad"], "生产中…": C["accent"],
-                 "待选择文件夹": C["dim"], "新增不足": C["dim"]}.get(
+        color = {"未登录": C["bad"], "微信还没绑定": C["warn"],
+                 "还没有开通权益": C["bad"], "剪辑中…": C["accent"],
+                 "选择录像文件夹": C["dim"], "录像还不够": C["dim"]}.get(
                      badge, C["good"] if "已生产" in badge else BRAND["primary"])
         self.prod_badge.config(fg=color)
         self.prod_detail.config(text=detail)
@@ -734,27 +734,28 @@ class PetWindow(tk.Tk):
         self._render_dir()
 
     def _works_text(self, prod, q):
-        """我的作品页状态行（真实数据；三选一在 portal 完成）。"""
+        """我的作品页状态行（真实数据；三选一在作品页完成）。文案面向
+        客户——不带契约编号/内部术语（用户反馈 2026-10-21）。"""
         if prod.get("last_ts"):
             t = time.strftime("%m-%d %H:%M", time.localtime(prod["last_ts"]))
-            base = f"最近一次生产：{t}（成功 {q.get('done', 0)} 场）"
+            base = f"最近一次出片：{t}（已出 {q.get('done', 0)} 场）"
         else:
-            base = "尚未生产（等录像新增超阈值后自动生产）"
-        return base + "\n候选与三选一在作品页进行（契约 C2S-15 起另接，当前为入口）"
+            base = "还没有作品。录像足够后（近 24 小时新增超过 2GB）会自动为你剪辑"
+        return base + "\n每天最多剪出 3 条候选，点「打开作品页」去挑一条最好的"
 
     def _open_portal(self):
         from toolbox.config import load_config
         url = ((load_config().get("account") or {}).get("portal_url")
                or "").strip()
         if not url:
-            self._flash("作品页地址未配置（account.portal_url）", C["warn"])
+            self._flash("作品页还没开通，请联系大师姐", C["warn"])
             return
         webbrowser.open(url)
 
     def _render_dir(self):
-        from toolbox.config import load_config
-        wdir = (load_config().get("folder_watch") or {}).get(
-            "watch_dir") or self.watch_dir
+        # 内存值优先（用户刚选择=最新意图），config 兜底（启动时从配置来）
+        wdir = self.watch_dir or (load_config().get("folder_watch") or {}).get(
+            "watch_dir")
         short = str(wdir) if len(str(wdir)) <= 46 else str(wdir)[:44] + "…"
         self.dir_lab.config(text=short or "未选择",
                             fg=C["fg"] if wdir else C["dim"])
@@ -887,7 +888,7 @@ class PetWindow(tk.Tk):
         except Exception:                        # noqa: BLE001 预检失败放行
             return ""
         if pre.get("logged_in") and pre.get("binding") == "none":
-            return "微信未绑定（账号设置里「去绑定」完成后自动补跑）"
+            return "微信还没绑定（在「账号设置」里绑定后，今天就帮你补上）"
         return ""
 
     def _daily_pass(self, wdir):

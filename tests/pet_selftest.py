@@ -67,7 +67,7 @@ try:
                       "last_ts": 0, "due": (True, "到达生产时刻"),
                       "added": 1e9, "limit": 2e9})
     win.update()
-    check("徽标：未绑定分支", "微信未绑定" in win.prod_badge.cget("text")
+    check("徽标：未绑定分支", "微信还没绑定" in win.prod_badge.cget("text")
           and win.prod_act.winfo_ismapped())
     check("前置：未绑定亮去绑定", "微信✗" in win.pre_labs["bind"].cget("text")
           and win.bind_btn.winfo_manager() == "pack")
@@ -83,14 +83,14 @@ try:
                       "due": (False, "窗口内已生产（23h 前）"),
                       "added": 3e9, "limit": 2e9})
     win.update()
-    check("徽标：窗口内已生产", "已生产" in win.prod_badge.cget("text"))
+    check("徽标：今天已出片", "已出片" in win.prod_badge.cget("text"))
     check("通知开关：已绑定可用", str(win.opt_in_chk.cget("state"))
           != "disabled" and win.opt_in_var.get() is True)
 
     win._render_prod({"wdir": "", "summary": {"queued": 0, "running": 0,
                                               "done": 0, "failed": []}})
     win.update()
-    check("徽标：未选目录", "待选择" in win.prod_badge.cget("text"))
+    check("徽标：未选目录", "选择录像文件夹" in win.prod_badge.cget("text"))
 
     # 目录设置（persist 已打桩，不写真 config）
     with tempfile.TemporaryDirectory() as td:
