@@ -421,7 +421,18 @@ def push(session, mode="eval", dry=False, run_eval=True, no_import=False,
             _mkdir(alias, remote_dir, dry)
             print(f"  -> {remote_dir.replace(remote + '/', '')}/")
             _rsync_to(alias, remote_dir, str(local), excludes, dry)
-        _write_manifest(alias, remote, disc, mode="eval", dry=dry)
+        # 端侧日志随包（REQ-20261021-004②，与 HTTPS 通道同形）：尾部快照
+        # rsync 到 sessions/<场次>/logs/；manifest 带 logs 键
+        log_files, log_map, log_names = _collect_logs(disc)
+        if log_files:
+            log_dir_remote = f"{remote}/sessions/{disc['session']}/logs"
+            _mkdir(alias, log_dir_remote, dry)
+            for rel, local in log_map.items():
+                print(f"  -> sessions/{disc['session']}/logs/{local.name}")
+                _rsync_to(alias, f"{log_dir_remote}/{local.name}",
+                          str(local), (), dry, raw_src=True)
+        _write_manifest(alias, remote, disc, mode="eval", logs=log_names,
+                        dry=dry)
 
     if no_import:
         print("（跳过服务端 import）")
@@ -614,8 +625,8 @@ def _build_manifest(disc, mode, logs=None):
     return out
 
 
-def _write_manifest(alias, remote, disc, mode, dry=False):
-    manifest = _build_manifest(disc, mode)
+def _write_manifest(alias, remote, disc, mode, dry=False, logs=None):
+    manifest = _build_manifest(disc, mode, logs=logs)
     fd, name = tempfile.mkstemp(suffix=".json")
     os.close(fd)                    # Windows：句柄不关，文件锁定删不掉
     tmp = Path(name)
