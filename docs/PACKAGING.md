@@ -26,6 +26,16 @@
 cmd //c build_exe.bat        # Git Bash 下;> /tmp/build_full.log 2>&1 收全量日志
 ```
 
+- 产物为 `dist\GameBuddy\`(目录版)与 `dist\GameBuddy-core.zip`(分发版);
+  **r7 起改名**并改用 spec + `tools/make_release.py` 打包(见下)。
+- **build_exe.bat 必须纯 ASCII**:cmd 按 GBK 解析,rem/echo 里的中文会被撕成
+  命令(r7 首轮实测:`'m' 不是内部或外部命令` → 打包中断)。
+- **ZIP 由 `tools/make_release.py` 生成**:PowerShell `Compress-Archive` 写出的
+  条目分隔符是反斜杠(r1~r6 全部如此),违反 ZIP 规范且跨平台工具会解成怪目录。
+  新脚本逐项写 `/`、校验无绝对路径/`..`/重复项,并写 `dist/release-manifest.txt`。
+- 顶层目录名取源目录名(`GameBuddy/`),解压不散落。
+- 用户说明 `快速开始.md` 由脚本自动放进包内。
+
 - 耗时 ~19s(增量);**判成败只看产物**:exe 与 zip 的 mtime 都应是
   刚刚,`bat` 末尾 echo 无条件打印、管道会吃掉退出码,别信回显。
 - bat 自动做:备份 `dist\DashijiePet\data` → 打包 → 拷净化 config
@@ -58,11 +68,15 @@ cmd //c build_exe.bat        # Git Bash 下;> /tmp/build_full.log 2>&1 收全量
    `pystray._win32`。`launch_pet` 是 CArchive 顶层脚本不在 PYZ=正常。
    ffmpeg/ffprobe 直接看 `_internal\`(9d4bed7 起捆绑,客户机 WinError2
    修复)。
-4. **冻结烟测**:exe 有头启动 → PowerShell MoveWindow 拖进屏内
-   (默认落右下角会被屏幕裁掉,截图前必移)→ 截图验 UI(导航三页/
-   徽标「未选择文件夹」「未登录」=净化 config 生效)→ Stop-Process
-   清理。更硬的行为级:`exe pipeline <不存在路径>`(env
-   PYTHONIOENCODING=gbk)→ stderr 合法 UTF-8+预期错误文本+rc=1。
+4. **冻结烟测**:exe 有头启动 → 截图验 UI(`PET_SNAPSHOT=<目录>` 自动
+   三页截图,免手工点击)→ Stop-Process 清理。硬指标:
+   - `exe pipeline <不存在路径>`(env `PYTHONIOENCODING=gbk`)→ stderr
+     合法 UTF-8 + 预期错误 + rc=1;
+   - **DPI 感知**(REQ-006):对运行中进程调 `GetProcessDpiAwareness`,
+     必须为 1(system aware),不能是 0(unaware);
+   - **版本资源**(REQ-009):`(Get-Item exe).VersionInfo` 的 ProductName/
+     FileVersion 非空;
+   - `PET_SNAPSHOT` 截图确认无 `None` 之类未翻译占位、无横向裁切。
 
 ## 4. 上传分发位(免登录直链,REQ-20261015-001)
 
@@ -82,6 +96,7 @@ ssh ecs "cd .../clients && sha256sum <名>-uploading.zip && \
 
 | 包 | SHA256(前16) | 内容 |
 | --- | --- | --- |
+| **`dashijie-pet-20261022-r7.zip`** | `2faac4b85c18d384` | =r6 + **REQ-006 DPI 感知(运行进程 system aware,非 0)**+ **REQ-007 组件规范**(矢量导航图标/语义按钮/空态/手机号脱敏/滚动容器)+ **REQ-008 状态可信**(完成判定分本地与云端、结果待确认、队列阶段与等待原因、移除暂停规则承诺文案)+ **REQ-009 交付规范**(EXE 版本资源、ZIP 正斜杠、快速开始.md、release-manifest)+ **REQ-010 脱敏诊断**(账号设置复制诊断信息);1188 项/389,138,967 字节。**当前推荐验证包**  |
 | **`dashijie-pet-20261022-r6.zip`** | `8c985f12f20102b0` | =r5 减新手教程 + **REQ-20261022-005 环境检测**:账号设置「开始剪辑的条件」第四项「环境」(与登录/权益/微信并列)+详情弹窗+登录后自动六级实测(配置/磁盘写入/ffmpeg/demo 素材/解码/识别)+7 天复用+剪片让路;移除教程入口与 C2S-16/17 调用;升级自动清理旧教程遗留;「打开作品页」只指向真实成片。**当前推荐验证包** |
 | **`GameBuddy-v0.1.zip`(对外正式名,=r5)** | `2147251b95be2a75` | 同 r5;对外分发用此名 |
 | `dashijie-pet-20261022-r5.zip` | `2147251b95be2a75` | =r4+新手教程全功能(入口/沙盒/队列拦截/守卫/C2S-16+C2S-17 微信推送接线)+队列任务化(目录级任务/任务列表/删减)+契约 1.4.1/1.4.2;**注意:其中的新手教程已被 REQ-20261022-005 环境检测替换(源码已改,待出 r6 包)** |

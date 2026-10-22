@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -38,6 +39,18 @@ LEGACY_TUTORIAL_SESSION = "新手体验-demo"   # 旧版新手教程沙盒会话
                                            # (REQ-20261022-005),升级时就地
                                            # 清理遗留队列/沙盒
 LEGACY_TUTORIAL_DIR = DATA / "tutorial"     # 旧版教程素材缓存(测试可重定向)
+# 跑链阶段中文名（与 pipeline.run_pipeline 顺序一致；REQ-20261022-008
+# 用于队列行显示「正在做什么」，不靠猜）
+PIPELINE_STAGES = [("download", "下载"), ("asr", "转写"),
+                   ("speaker", "说话人"), ("detect", "画面识别"),
+                   ("knockdowns", "击倒切片"), ("pickups", "拾取切片"),
+                   ("queues", "匹配截图"), ("voice", "语音评估"),
+                   ("push", "上传")]
+STAGE_CN = dict(PIPELINE_STAGES)
+
+_PROGRESS = {}          # session -> {"stage","index","total","ts","started"}
+_PROGRESS_LOCK = threading.Lock()
+
 SCAN_DEPTH = 3        # 监控根下递归深度上限（REQ-20261021-004）：目标目录
                       # 最深=监控根/x/y/（二级场次，如 根/<游戏>/<场次>/），
                       # 再深不扫——防误扫用户整盘；只看根直下=旧行为
@@ -244,9 +257,11 @@ def scan(watch_dir, state=None):
         if entry.name.startswith("."):
             continue
         walk(entry, 0)                     # 根直下散装视频/一二级目录
-    # new>0 或发生目录任务聚合(note/键更新)都要落盘
+    # new>0 或发生目录任务聚合(note/键更新)都要落盘;同时记扫描时刻(UI)
+    prev_ts = state.get("last_scan_ts")
+    state["last_scan_ts"] = time.time()
     if new or any(j.get("note") == "内容已更新"
-                  for j in state["jobs"].values()):
+                  for j in state["jobs"].values()) or prev_ts is None:
         _save(state)
     return new
 
@@ -327,6 +342,115 @@ def kill_current():
     _CURRENT = None
 
 
+def _progress_begin(session):
+    with _PROGRESS_LOCK:
+        _PROGRESS[session] = {"stage": "准备", "index": 0,
+                             "total": len(PIPELINE_STAGES),
+                             "ts": time.time(), "started": time.time()}
+
+
+def _progress_line(session, line):
+    """从 pipeline stdout 提取阶段推进;认不出的行忽略。"""
+    import re as _re
+    body = line.strip()
+    if body.startswith("[pipeline]"):
+        body = body[len("[pipeline]"):].strip()
+    m = _re.match(r"^(\w+) 开始", body)
+    if m and m.group(1) in STAGE_CN:
+        key = m.group(1)
+        idx = [k for k, _ in PIPELINE_STAGES].index(key) + 1
+        with _PROGRESS_LOCK:
+            cur = _PROGRESS.setdefault(session, {})
+            cur.update(stage=STAGE_CN[key], index=idx, ts=time.time())
+        return
+    m = _re.match(r"^(\w+) 完成", body)
+    if m and m.group(1) in STAGE_CN:
+        key = m.group(1)
+        idx = [k for k, _ in PIPELINE_STAGES].index(key) + 1
+        with _PROGRESS_LOCK:
+            cur = _PROGRESS.setdefault(session, {})
+            cur.update(stage=STAGE_CN[key] + "完成", index=idx,
+                       ts=time.time())
+        return
+    m = _re.match(r"场次：(.+?)，(\d+) 个分片", body)
+    if m:
+        with _PROGRESS_LOCK:
+            _PROGRESS.setdefault(session, {}).update(
+                parts=int(m.group(2)), ts=time.time())
+
+
+def _progress_end(session):
+    with _PROGRESS_LOCK:
+        cur = _PROGRESS.get(session)
+        if cur is not None:
+            cur["finished_ts"] = time.time()
+            cur["stage"] = "结束"
+
+
+def scan_stats(watch_dir):
+    """目录扫描摘要(UI「最近检查/发现视频/待处理」,REQ-20261022-008)。"""
+    wd = Path(watch_dir)
+    st = _load()
+    vids = 0
+    try:
+        for entry in wd.iterdir():
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                vids += len(_videos_in(entry))
+            elif entry.suffix.lower() in VIDEO_EXTS:
+                vids += 1
+    except OSError:
+        pass
+    pending = sum(1 for j in st["jobs"].values() if j.get("state") == "queued")
+    last = ""
+    ts = st.get("last_scan_ts") or 0
+    if ts:
+        last = time.strftime("%m-%d %H:%M", time.localtime(float(ts)))
+    return {"last_scan": last or "尚未检查", "videos": vids,
+            "pending": pending,
+            "interval_min": int(_cfg().get("scan_interval_min", 120)),
+            "watch_dir": str(wd)}
+
+
+def target_stable(path):
+    """目标是否已静置稳定(供 UI 说明「等待录像写完」)。"""
+    try:
+        return _stable(Path(path), int(_cfg().get("stable_min", 10)) * 60)
+    except OSError:
+        return False
+
+
+def mark_scan(next_ts):
+    """记录下一次扫描时刻(UI 显示「下次检查 HH:MM」)。"""
+    state = _load()
+    state["next_scan_ts"] = float(next_ts or 0)
+    _save(state)
+
+
+def next_scan_ts(state=None):
+    st = state if state is not None else _load()
+    try:
+        return float(st.get("next_scan_ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def progress_snapshot():
+    """当前跑链进度(副本):{session: {stage,index,total,parts,ts,...}}。"""
+    with _PROGRESS_LOCK:
+        return {k: dict(v) for k, v in _PROGRESS.items()}
+
+
+def running_progress():
+    """正在跑的单个任务进度;无则 None。"""
+    snap = progress_snapshot()
+    for v in snap.values():
+        if "finished_ts" not in v:
+            return v
+    return None
+
+
 def run_pipeline_subprocess(target_path):
     """跑链子进程（与 pet 同配方：exe 形态自身即 CLI；UTF-8；管道收集）。
 
@@ -347,11 +471,22 @@ def run_pipeline_subprocess(target_path):
                             text=True, encoding="utf-8", errors="replace",
                             creationflags=_proc_mod().NO_WINDOW)
     _CURRENT = proc
+    # 逐行读:一边保留尾部输出,一边把阶段推进登记到 _PROGRESS,供 UI 显示
+    # 「正在做什么」(REQ-20261022-008)。读流不改变退出码语义。
+    session = (Path(target_path).name if Path(target_path).is_dir()
+               else Path(target_path).parent.name)
+    _progress_begin(session)
+    lines = []
     try:
-        out, _ = proc.communicate()
+        for line in proc.stdout or []:
+            lines.append(line)
+            if len(lines) > 4000:              # 防超长输出吃内存
+                del lines[:1000]
+            _progress_line(session, line.rstrip("\n"))
     finally:
         _CURRENT = None
-    return proc.returncode, (out or "")[-2000:]
+        _progress_end(session)
+    return proc.returncode, ("".join(lines))[-2000:]
 
 
 def process_pending(watch_dir, runner=run_pipeline_subprocess, limit=1):
@@ -435,7 +570,10 @@ def jobs_view():
     out = []
     for k, j in sorted(st.items(), key=lambda kv: kv[1].get("enqueued_at", "")):
         out.append({"key": k, "session": j["session"], "state": j["state"],
-                    "note": j.get("note", "")})
+                    "note": j.get("note", ""),
+                    "taken_ts": j.get("taken_ts", 0),
+                    "enqueued_at": j.get("enqueued_at", ""),
+                    "path": j.get("path", "")})
     return out
 
 

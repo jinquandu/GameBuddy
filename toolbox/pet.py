@@ -18,7 +18,6 @@ watch_pipeline_log 消费），主窗不再驱动手动跑链。
 import json
 import os
 import re
-import sys
 import threading
 import time
 import tkinter as tk
@@ -26,8 +25,11 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from toolbox import dpi, ui_kit, version
 from toolbox.config import DATA, ROOT, load_config
 from toolbox.logs import get as _get_log
+from toolbox.ui_kit import (BRAND, F_BODY, F_DIALOG, F_H1, F_SMALL, F_TITLE,
+                            FONT)
 
 LOG = _get_log("pet")
 LOG_PIPE = _get_log("pipeline")       # 跑链子进程全量输出（排障用）
@@ -46,18 +48,11 @@ STAGE_WEIGHT = {"download": .02, "asr": .03, "speaker": .01, "detect": .75,
                 "knockdowns": .10, "pickups": .06, "queues": .01,
                 "voice": .01, "push": .01}
 
-C = {"bg": "#FFFFFF", "fg": "#3A3238", "dim": "#8C7F88",
-     "accent": "#7C5CE0", "good": "#4CA37E", "warn": "#D99A3C",
-     "bad": "#D9534F"}
-# 品牌配色语言（UI V1 评审稿）：页面浅紫灰底、白卡片、主紫/深紫/粉 CTA
-BRAND = {"page": "#F2F1F6", "card": "#FFFFFF", "side": "#FFFFFF",
-         "primary": "#7C5CE0", "deep": "#3B2A5E", "cta": "#F4517B",
-         "lav": "#EFE9FB", "line": "#E7E4F0"}
-FONT = "Microsoft YaHei UI"
-W = 660                        # 主窗宽（左导航 136 + 内容区）
+# 颜色/字体/间距见 toolbox/ui_kit(REQ-20261022-007 统一组件规范);
+# BRAND/F_* 由 ui_kit 导入,这里只保留窗口级常量。
+W = 660                        # 主窗逻辑宽(左导航 136 + 内容区)
 HIST = DATA / "pet" / "history.json"
 LAST_WORKS = DATA / "pet" / "last_works.json"
-NAV = (("home", "工作台"), ("works", "我的作品"), ("settings", "账号设置"))
 
 
 def _or_dash(v):
@@ -280,56 +275,83 @@ def latest_stats():
     return out
 
 
-# ---------------------------------------------------------------- 主窗
-
 class PetWindow(tk.Tk):
+    """主窗(REQ-20261022-006/007/008/010 改版)。
+
+    布局:左导航(图标+文字) / 内容区(可滚动) / 底部状态行。
+    状态可信原则:只显示可核实结果——本地队列完成 ≠ 云端出片;云端
+    produce 未完成时显示「云端生成中」或「结果待确认」,不提前报成片。
+    """
+
+    ENV_AUTO_DAYS = 7
+    STATE_TXT = {"queued": "排队中", "running": "处理中", "done": "已完成",
+                 "failed": "失败"}
+
     def __init__(self, address=""):
+        dpi.setup()                       # 必须在建任何窗口之前(REQ-006)
         super().__init__()
-        self.title("陪玩大师姐")
-        self.resizable(False, False)
+        dpi.apply_tk(self)
+        self.title(version.PRODUCT)
         self.configure(bg=BRAND["page"])
+        self.minsize(dpi.px(600), dpi.px(520))
+        self.resizable(True, True)
+        ui_kit.setup_style(self)
+        self._apply_window_icon()
         if address:
             LOG.info("pet --address 已忽略：前台无 BV/URL 入口（UI V1 评审稿）")
 
         hist = self._load_hist()
-        self.watch_dir = hist.get("watch_dir", "")   # 后台日任务目录兜底
-        self.tray = None             # pystray.Icon（首次最小化时创建）
+        self.watch_dir = hist.get("watch_dir", "")
+        self.tray = None
         self.daily_stop = threading.Event()
         self.daily_thread = None
         self._status_text = ""
         self._status_sticky = False
-        self._page = "home"
-        self._pre = {}          # prerequisites() 最近快照（主线程渲染用）
-        self._prod = {}         # 生产状态快照（summary/窗口/新增字节）
-        self._sess = {}         # 当前登录会话快照
-        self._env = {}          # 环境检测结果快照(REQ-20261022-005)
-        self._env_busy = False  # 检测线程进行中(防重入)
-        self._env_auto_user = None   # 本会话已自动检测过的账号(防重复跑)
+        self._page_key = "home"
+        self._pre = {}
+        self._prod = {}
+        self._sess = {}
+        self._env = {}
+        self._env_busy = False
+        self._env_auto_user = None
+        self._produce = {}          # session -> {state,error,works_url,ts}
+        self._last_works = self._load_last_works()
 
         self._build()
-        self.geometry(f"{W}x600")
+        self.geometry(f"{dpi.px(W)}x{dpi.px(600)}")
         self._place_bottom_right()
-        self.bind("<Unmap>", self._on_unmap)   # 最小化 → 托盘
+        self.bind("<Unmap>", self._on_unmap)
         self._legacy_cleanup()
         self._acct_refresh()
         self._prod_refresh()
         self._daily_start()
-        # 点 X 必须走 _on_close：绕过会跳过杀日任务子进程/存历史/退托盘
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(15_000, self._queue_tick)   # 队列实时性(REQ-20261022-002
-                                               # 优化:15s 自动刷新任务列表)
+        self.after(15_000, self._queue_tick)
         self.after(2500, self._dev_snapshot)
 
+    def _apply_window_icon(self):
+        """窗口/任务栏图标(REQ-007 V08):用包内头像生成 ico,失败不影响启动。"""
+        try:
+            base = Path(__file__).resolve().parent / "pet_assets"
+            png = base / "avatar.png"
+            if not png.is_file():
+                return
+            from PIL import Image, ImageTk
+            img = Image.open(png).convert("RGBA")
+            self._icon_photo = ImageTk.PhotoImage(img)
+            self.iconphoto(True, self._icon_photo)
+        except Exception as e:                  # noqa: BLE001
+            LOG.info("窗口图标设置跳过:%s", e)
+
     def _queue_tick(self):
-        """队列实时刷新节拍(15s):新入队/状态变化自动上屏(用户反馈——
-        加入新任务后列表滞后)。轻量:只读队列视图+渲染,不碰网络。"""
+        """队列实时刷新节拍(15s):新入队/状态变化自动上屏。轻量:只读队列
+        视图+渲染,不碰网络;诊断/进度也随这一拍刷新。"""
         self._prod_refresh()
         self.after(15_000, self._queue_tick)
 
     def _legacy_cleanup(self):
         """升级清理(REQ-20261022-005):旧版新手教程的素材缓存/沙盒/队列
-        记录一并移除。缓存已被校验过的 demo 素材先迁给环境检测复用,省一次
-        40MB 下载。全程尽力而为,失败不影响启动。"""
+        记录一并移除。校验过的 demo 素材先迁给环境检测复用,省一次下载。"""
         try:
             from toolbox import envcheck
             envcheck.adopt_legacy_material()
@@ -338,206 +360,245 @@ class PetWindow(tk.Tk):
         except Exception as e:                  # noqa: BLE001 清理失败不拦启动
             LOG.info("旧版教程遗留清理跳过:%s", e)
 
-    # ---------- 布局（左导航 + 三页卡片；素朴紧凑，配色=评审稿语言）
+    # ---------- 布局 ----------
 
-    def _card(self, parent, title):
-        """白卡片：标题行 + 内容区。返回内容 Frame。"""
-        card = tk.Frame(parent, bg=BRAND["card"], highlightbackground=
-                        BRAND["line"], highlightthickness=1)
-        card.pack(fill="x", padx=16, pady=(0, 10))
-        tk.Label(card, text=title, bg=BRAND["card"], fg=BRAND["deep"],
-                 font=(FONT, 10, "bold"), anchor="w").pack(
-            fill="x", padx=12, pady=(10, 4))
-        body = tk.Frame(card, bg=BRAND["card"])
-        body.pack(fill="x", padx=12, pady=(0, 10))
-        return body
+    def _brand_mark(self, parent, bg):
+        c = tk.Canvas(parent, width=dpi.px(22), height=dpi.px(22), bg=bg,
+                      bd=0, highlightthickness=0, takefocus=0)
+        c.create_oval(dpi.px(1), dpi.px(1), dpi.px(21), dpi.px(21),
+                      fill=BRAND["primary"], outline="")
+        c.create_polygon(dpi.px(9), dpi.px(6), dpi.px(9), dpi.px(16),
+                         dpi.px(16), dpi.px(11), fill="#FFFFFF", outline="")
+        return c
 
     def _build(self):
-        side = tk.Frame(self, bg=BRAND["side"], width=136)
+        side = tk.Frame(self, bg=BRAND["side"], width=dpi.px(136))
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
-        tk.Label(side, text="陪玩大师姐", bg=BRAND["side"], fg=BRAND["deep"],
-                 font=(FONT, 11, "bold")).pack(anchor="w", padx=14,
-                                               pady=(14, 0))
+        head = tk.Frame(side, bg=BRAND["side"])
+        head.pack(fill="x", padx=dpi.px(12), pady=(dpi.px(14), 0))
+        self._brand_mark(head, BRAND["side"]).pack(side="left")
+        tk.Label(head, text=version.PRODUCT, bg=BRAND["side"],
+                 fg=BRAND["deep"], font=F_H1).pack(side="left",
+                                                   padx=(dpi.px(6), 0))
         tk.Label(side, text="你打游戏 我剪高光", bg=BRAND["side"],
-                 fg=C["dim"], font=(FONT, 8)).pack(anchor="w", padx=14)
+                 fg=BRAND["dim"], font=F_SMALL).pack(anchor="w",
+                                                     padx=dpi.px(14))
+
         self._nav_btns = {}
-        for key, txt in NAV:
-            b = tk.Label(side, text=f" {txt}", anchor="w", cursor="hand2",
-                         bg=BRAND["side"], fg=BRAND["deep"],
-                         font=(FONT, 10), padx=10, pady=7)
-            b.pack(fill="x", padx=8, pady=(10 if key == "home" else 2))
-            b.bind("<Button-1>", lambda e, k=key: self._nav(k))
-            self._nav_btns[key] = b
-        # 侧栏底部：权益小卡（深紫）+ 账号行
+        self._nav_icons = {}
+        for key, txt, ic in (("home", "工作台", "home"),
+                             ("works", "我的作品", "works"),
+                             ("settings", "账号设置", "settings")):
+            row = tk.Frame(side, bg=BRAND["side"], cursor="hand2")
+            row.pack(fill="x", padx=dpi.px(8),
+                     pady=(dpi.px(8) if key == "home" else dpi.px(2), 0))
+            icon_c = ui_kit.icon(row, ic, BRAND["deep"], BRAND["side"])
+            icon_c.pack(side="left", padx=(dpi.px(8), dpi.px(6)),
+                        pady=dpi.px(6))
+            lab = tk.Label(row, text=txt, anchor="w", bg=BRAND["side"],
+                           fg=BRAND["deep"], font=F_BODY)
+            lab.pack(side="left", fill="x", expand=True, pady=dpi.px(6))
+            for w in (row, icon_c, lab):
+                w.bind("<Button-1>", lambda e, k=key: self._nav(k))
+            self._nav_btns[key] = row
+            self._nav_icons[key] = (icon_c, lab)
+
         foot = tk.Frame(side, bg=BRAND["side"])
-        foot.pack(side="bottom", fill="x", padx=8, pady=8)
+        foot.pack(side="bottom", fill="x", padx=dpi.px(8), pady=dpi.px(8))
         self.side_member = tk.Label(
-            foot, text="权益 ·", bg=BRAND["deep"], fg="#FFFFFF",
-            font=(FONT, 9), anchor="w", padx=8, pady=6, wraplength=104,
-            justify="left")
+            foot, text="权益 ·", bg=BRAND["deep"], fg="#FFFFFF", font=F_SMALL,
+            anchor="w", padx=dpi.px(8), pady=dpi.px(6),
+            wraplength=dpi.px(104), justify="left")
         self.side_member.pack(fill="x")
         self.side_acct = tk.Label(foot, text="未登录", bg=BRAND["side"],
-                                  fg=C["dim"], font=(FONT, 8), anchor="w")
-        self.side_acct.pack(anchor="w", pady=(4, 0))
+                                  fg=BRAND["dim"], font=F_SMALL, anchor="w",
+                                  wraplength=dpi.px(116), justify="left")
+        self.side_acct.pack(anchor="w", pady=(dpi.px(4), 0))
+        tk.Label(foot, text=f"v{version.VERSION} · {version.BUILD}",
+                 bg=BRAND["side"], fg=BRAND["faint"],
+                 font=(FONT, 7)).pack(anchor="w", pady=(dpi.px(2), 0))
 
         body = tk.Frame(self, bg=BRAND["page"])
         body.pack(side="right", fill="both", expand=True)
-        pages = tk.Frame(body, bg=BRAND["page"])
-        pages.pack(fill="both", expand=True)
+        self.status_lab = tk.Label(body, text="", bg=BRAND["page"],
+                                   fg=BRAND["dim"], font=F_SMALL, anchor="w",
+                                   wraplength=dpi.px(430), justify="left")
+        self.status_lab.pack(side="bottom", fill="x", padx=dpi.px(16),
+                             pady=(0, dpi.px(6)))
+
         self._pages = {}
-        for key, _ in NAV:
-            self._pages[key] = tk.Frame(pages, bg=BRAND["page"])
+        for key in ("home", "works", "settings"):
+            self._pages[key] = ui_kit.ScrollFrame(body, BRAND["page"])
 
-        # ---- 工作台：文件夹源 / 今日生产 / 后台队列
-        home = self._pages["home"]
-        b1 = self._card(home, "录像文件夹")
-        self.dir_lab = tk.Label(b1, text="未选择", bg=BRAND["card"],
-                                fg=C["fg"], font=(FONT, 10), anchor="w",
-                                wraplength=360, justify="left")
+        self._build_home(self._pages["home"].inner)
+        self._build_works(self._pages["works"].inner)
+        self._build_settings(self._pages["settings"].inner)
+        self._nav("home")
+
+    def _build_home(self, home):
+        b1 = ui_kit.card(home, "录像文件夹")
+        self.dir_row = tk.Frame(b1, bg=BRAND["card"])
+        self.dir_row.pack(fill="x")
+        ui_kit.icon(self.dir_row, "folder", BRAND["primary"],
+                    BRAND["card"]).pack(side="left", padx=(0, dpi.px(6)))
+        self.dir_lab = tk.Label(self.dir_row, text="未选择", bg=BRAND["card"],
+                                fg=BRAND["fg"], font=F_BODY, anchor="w",
+                                wraplength=dpi.px(330), justify="left")
         self.dir_lab.pack(side="left", fill="x", expand=True)
-        ttk.Button(b1, text="更换文件夹", width=11,
-                   command=self._browse).pack(side="right")
-        tk.Label(home, text="每 2 小时自动检查一次新增录像，稳定后自动为你剪辑",
-                 bg=BRAND["page"], fg=C["dim"], font=(FONT, 8),
-                 anchor="w").pack(fill="x", padx=18)
+        ui_kit.button(self.dir_row, "更换文件夹", self._browse,
+                      kind="brand").pack(side="right")
+        self.dir_note = tk.Label(b1, text="", bg=BRAND["card"],
+                                 fg=BRAND["dim"], font=F_SMALL, anchor="w",
+                                 wraplength=dpi.px(420), justify="left")
+        self.dir_note.pack(fill="x", pady=(dpi.px(6), 0))
 
-        b2 = self._card(home, "今日生产")
+        b2 = ui_kit.card(home, "今日进度")
         head2 = tk.Frame(b2, bg=BRAND["card"])
         head2.pack(fill="x")
         self.prod_badge = tk.Label(head2, text="…", bg=BRAND["lav"],
-                                   fg=BRAND["primary"], font=(FONT, 9),
-                                   padx=8, pady=2)
+                                   fg=BRAND["primary"], font=F_BODY,
+                                   padx=dpi.px(8), pady=dpi.px(3))
         self.prod_badge.pack(side="left")
-        self.prod_act = ttk.Button(head2, text="", width=9)
+        self.prod_act = ui_kit.button(head2, "", kind="small")
         self.prod_act.pack(side="right")
-        self.prod_detail = tk.Label(b2, text="", bg=BRAND["card"], fg=C["dim"],
-                                    font=(FONT, 9), anchor="w", wraplength=440,
-                                    justify="left")
-        self.prod_detail.pack(fill="x", pady=(6, 0))
+        self.prod_detail = tk.Label(b2, text="", bg=BRAND["card"],
+                                    fg=BRAND["dim"], font=F_SMALL, anchor="w",
+                                    wraplength=dpi.px(430), justify="left")
+        self.prod_detail.pack(fill="x", pady=(dpi.px(6), 0))
 
-        b3 = self._card(home, "任务队列")
+        b3 = ui_kit.card(home, "任务队列")
         head3 = tk.Frame(b3, bg=BRAND["card"])
         head3.pack(fill="x")
         self.queue_lab = tk.Label(head3, text="…", bg=BRAND["card"],
-                                  fg=C["fg"], font=(FONT, 9), anchor="w")
+                                  fg=BRAND["fg"], font=F_BODY, anchor="w")
         self.queue_lab.pack(side="left")
-        ttk.Button(head3, text="刷新", width=6,
-                   command=self._all_refresh).pack(side="right")
-        # 任务列表(REQ-20261022-002 优化):每任务一行=状态徽标+场次名+
-        # 删除钮;排序=入队顺序
+        ui_kit.button(head3, "刷新", self._all_refresh,
+                      kind="ghost").pack(side="right")
         self.queue_rows = tk.Frame(b3, bg=BRAND["card"])
-        self.queue_rows.pack(fill="x", pady=(4, 0))
+        self.queue_rows.pack(fill="x", pady=(dpi.px(4), 0))
 
-        # ---- 我的作品：三选一说明 + 真实状态 + 作品页入口
-        works = self._pages["works"]
-        w1 = self._card(works, "每日三选一")
-        self.works_lab = tk.Label(w1, text="…", bg=BRAND["card"], fg=C["fg"],
-                                  font=(FONT, 9), anchor="w", wraplength=440,
-                                  justify="left")
+    def _build_works(self, works):
+        w1 = ui_kit.card(works, "我的作品")
+        self.works_row = tk.Frame(w1, bg=BRAND["card"])
+        self.works_row.pack(fill="x")
+        self.works_lab = tk.Label(self.works_row, text="…", bg=BRAND["card"],
+                                  fg=BRAND["fg"], font=F_BODY, anchor="w",
+                                  wraplength=dpi.px(340), justify="left")
         self.works_lab.pack(side="left", fill="x", expand=True)
-        ttk.Button(w1, text="打开作品页", width=11,
-                   command=self._open_portal).pack(side="right")
-        tk.Label(works, text="每天最多剪 3 条候选，挑 1 条最好的；选定后当天不能换，"
-                             "发布前最后由你在抖音确认",
-                 bg=BRAND["page"], fg=C["dim"], font=(FONT, 8), anchor="w",
-                 wraplength=420, justify="left").pack(fill="x", padx=18)
+        self.works_btn = ui_kit.button(self.works_row, "打开作品页",
+                                       self._open_portal, kind="brand")
+        self.works_btn.pack(side="right")
+        self.works_empty = tk.Frame(w1, bg=BRAND["card"])
+        ui_kit.hint(works,
+                    "每天最多剪 3 条候选，挑 1 条最好的。" + "\n" +
+                    "选片与发布以作品页当前提示为准，最终由你在抖音确认。",
+                    wraplength=520)
 
-        # ---- 账号设置：账号 / 生产前置 / 微信与通知 / 电脑与录像
-        st = self._pages["settings"]
-        s1 = self._card(st, "账号")
-        self.set_acct_lab = tk.Label(s1, text="未登录", bg=BRAND["card"],
-                                     fg=C["fg"], font=(FONT, 10), anchor="w")
+    def _build_settings(self, st):
+        s1 = ui_kit.card(st, "账号")
+        row1 = tk.Frame(s1, bg=BRAND["card"])
+        row1.pack(fill="x")
+        self.set_acct_lab = tk.Label(row1, text="未登录", bg=BRAND["card"],
+                                     fg=BRAND["fg"], font=F_BODY, anchor="w")
         self.set_acct_lab.pack(side="left", fill="x", expand=True)
-        self.acct_btn = ttk.Button(s1, text="登录", width=7,
-                                   command=self._acct_click)
+        self.acct_btn = ui_kit.button(row1, "登录", self._acct_click,
+                                      kind="brand", width=7)
         self.acct_btn.pack(side="right")
+        row1b = tk.Frame(s1, bg=BRAND["card"])
+        row1b.pack(fill="x", pady=(dpi.px(6), 0))
+        self.diag_btn = ui_kit.button(row1b, "复制诊断信息", self._copy_diag,
+                                      kind="ghost")
+        self.diag_btn.pack(side="left")
+        self.ver_lab = tk.Label(row1b, text="", bg=BRAND["card"],
+                                fg=BRAND["faint"], font=F_SMALL, anchor="e")
+        self.ver_lab.pack(side="right")
+        self.ver_lab.config(text=f"v{version.VERSION}（{version.BUILD}）")
 
-        s2 = self._card(st, "开始剪辑的条件")
+        s2 = ui_kit.card(st, "开始剪辑的条件")
         pre_row = tk.Frame(s2, bg=BRAND["card"])
         pre_row.pack(fill="x")
         self.pre_labs = {}
-        # 条件徽标与「登录/权益/微信」并列:第 4 项=环境检测
-        # (REQ-20261022-005,替换原新手教程;登录后自动跑一次)
         for key, txt in (("login", "登录"), ("member", "权益"),
                          ("bind", "微信"), ("env", "环境")):
-            lab = tk.Label(pre_row, text=txt, bg=BRAND["card"], fg=C["dim"],
-                           font=(FONT, 9))
-            lab.pack(side="left", padx=(0, 12))
+            lab = tk.Label(pre_row, text=txt, bg=BRAND["card"],
+                           fg=BRAND["dim"], font=F_BODY)
+            lab.pack(side="left", padx=(0, dpi.px(12)))
             self.pre_labs[key] = lab
             if key == "env":
                 lab.configure(cursor="hand2")
                 lab.bind("<Button-1>", lambda e: self._env_click())
         btn_row = tk.Frame(pre_row, bg=BRAND["card"])
         btn_row.pack(side="right")
-        self.bind_btn = ttk.Button(btn_row, text="去绑定", width=7,
-                                   command=self._bind_click)
+        self.bind_btn = ui_kit.button(btn_row, "去绑定", self._bind_click,
+                                      kind="brand", width=7)
         self.bind_btn.pack(side="right")
-        self.env_btn = ttk.Button(btn_row, text="检测", width=7,
-                                  command=self._env_click)
-        self.env_btn.pack(side="right", padx=(0, 6))
-        self.env_detail = tk.Label(s2, text="", bg=BRAND["card"], fg=C["dim"],
-                                   font=(FONT, 9), anchor="w",
-                                   wraplength=440, justify="left")
-        self.env_detail.pack(fill="x", pady=(6, 0))
+        self.env_btn = ui_kit.button(btn_row, "检测", self._env_click,
+                                     kind="brand", width=7)
+        self.env_btn.pack(side="right", padx=(0, dpi.px(6)))
+        self.env_detail = tk.Label(s2, text="", bg=BRAND["card"],
+                                   fg=BRAND["dim"], font=F_SMALL, anchor="w",
+                                   wraplength=dpi.px(430), justify="left")
+        self.env_detail.pack(fill="x", pady=(dpi.px(6), 0))
 
-        s3 = self._card(st, "微信与通知")
-        self.set_bind_lab = tk.Label(s3, text="微信：未知", bg=BRAND["card"],
-                                     fg=C["fg"], font=(FONT, 9), anchor="w")
+        s3 = ui_kit.card(st, "微信与通知")
+        row3 = tk.Frame(s3, bg=BRAND["card"])
+        row3.pack(fill="x")
+        self.set_bind_lab = tk.Label(row3, text="微信：未知", bg=BRAND["card"],
+                                     fg=BRAND["fg"], font=F_BODY, anchor="w")
         self.set_bind_lab.pack(side="left", fill="x", expand=True)
         self.opt_in_var = tk.BooleanVar(value=False)
-        self._opt_busy = {"on": False}     # 程序置值不回发 consent
-        self.opt_in_chk = ttk.Checkbutton(
-            s3, text="成片通知", variable=self.opt_in_var,
-            command=self._on_opt_in)
+        self._opt_busy = {"on": False}
+        self.opt_in_chk = ui_kit.checkbutton(
+            row3, "成片通知", self.opt_in_var, command=self._on_opt_in)
         self.opt_in_chk.pack(side="right")
-        tk.Label(st, text="更换收片微信请联系大师姐；通知开关与绑定相互独立"
-                          "（关通知≠解绑）",
-                 bg=BRAND["page"], fg=C["dim"], font=(FONT, 8), anchor="w",
-                 wraplength=420, justify="left").pack(fill="x", padx=18)
+        self.notify_lab = tk.Label(s3, text="通知送达：未知（暂不提供查询）",
+                                   bg=BRAND["card"], fg=BRAND["dim"],
+                                   font=F_SMALL, anchor="w")
+        self.notify_lab.pack(fill="x", pady=(dpi.px(6), 0))
+        ui_kit.hint(st, "更换收片微信请联系大师姐；通知开关与绑定相互独立（关通知≠解绑）")
 
-        s4 = self._card(st, "电脑与录像")
+        s4 = ui_kit.card(st, "电脑与录像")
         from toolbox import device_identity as _di
         tk.Label(s4, text=f"本机设备 {_di.device_code()[:15]}…（一机一号，"
                           "换电脑需短信重新验证）",
-                 bg=BRAND["card"], fg=C["fg"], font=(FONT, 9), anchor="w",
-                 wraplength=440, justify="left").pack(fill="x")
+                 bg=BRAND["card"], fg=BRAND["fg"], font=F_SMALL, anchor="w",
+                 wraplength=dpi.px(430), justify="left").pack(fill="x")
         row4 = tk.Frame(s4, bg=BRAND["card"])
-        row4.pack(fill="x", pady=(6, 0))
+        row4.pack(fill="x", pady=(dpi.px(6), 0))
         self.set_dir_lab = tk.Label(row4, text="录像目录：未选择",
-                                    bg=BRAND["card"], fg=C["fg"],
-                                    font=(FONT, 9), anchor="w",
-                                    wraplength=350, justify="left")
+                                    bg=BRAND["card"], fg=BRAND["fg"],
+                                    font=F_SMALL, anchor="w",
+                                    wraplength=dpi.px(330), justify="left")
         self.set_dir_lab.pack(side="left", fill="x", expand=True)
-        ttk.Button(row4, text="更换文件夹", width=11,
-                   command=self._browse).pack(side="right")
-
-        # ---- 常驻状态行（短闪提示；出错 sticky）
-        self.status_lab = tk.Label(body, text="", bg=BRAND["page"],
-                                   fg=C["dim"], font=(FONT, 9), anchor="w",
-                                   wraplength=W - 180, justify="left")
-        self.status_lab.pack(fill="x", padx=18, pady=(0, 8))
-        self._nav("home")
+        ui_kit.button(row4, "更换文件夹", self._browse,
+                      kind="brand").pack(side="right")
+        ui_kit.hint(st, "便携版：解压后运行，升级请保留 data 目录（账号、"
+                        "设备与队列在里面）")
 
     def _nav(self, page):
-        self._page = page
-        for key, _ in NAV:
-            btn = self._nav_btns[key]
+        self._page_key = page
+        for key, (icon_c, lab) in self._nav_icons.items():
             sel = key == page
-            btn.config(bg=BRAND["lav"] if sel else BRAND["side"],
-                       fg=BRAND["primary"] if sel else BRAND["deep"])
+            bg = BRAND["lav"] if sel else BRAND["side"]
+            fg = BRAND["primary"] if sel else BRAND["deep"]
+            icon_c.master.config(bg=bg)
+            icon_c.config(bg=bg)
+            ui_kit.draw_icon(icon_c,
+                             {"home": "home", "works": "works",
+                              "settings": "settings"}[key], fg)
+            lab.config(bg=bg, fg=fg)
             self._pages[key].pack_forget()
         self._pages[page].pack(fill="both", expand=True)
 
     def _place_bottom_right(self):
-        """首显落在屏幕右下（托盘附近），不打扰主工作区。"""
         self.update_idletasks()
         w, h = self.winfo_width(), self.winfo_height()
-        x = self.winfo_screenwidth() - w - 36
-        y = self.winfo_screenheight() - h - 72
+        x = self.winfo_screenwidth() - w - dpi.px(36)
+        y = self.winfo_screenheight() - h - dpi.px(72)
         self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
-    # ---------- 历史（目录持久化在 config，hist 只留兜底）
+    # ---------- 历史/作品页缓存 ----------
 
     def _load_hist(self):
         try:
@@ -552,10 +613,28 @@ class PetWindow(tk.Tk):
                                    ensure_ascii=False, indent=1),
                         encoding="utf-8")
 
-    # ---------- 账号（契约 §4A，C2S-10/11）
+    def _load_last_works(self):
+        try:
+            d = json.loads(LAST_WORKS.read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_last_works(self, session, works_url):
+        if not works_url:
+            return
+        d = {"session": session, "works_url": works_url, "ts": time.time()}
+        self._last_works = d
+        try:
+            LAST_WORKS.parent.mkdir(parents=True, exist_ok=True)
+            LAST_WORKS.write_text(json.dumps(d, ensure_ascii=False, indent=1),
+                                  encoding="utf-8")
+        except OSError as e:
+            LOG.info("作品页地址落盘失败:%s", e)
+
+    # ---------- 账号 ----------
 
     def _acct_cfg(self):
-        from toolbox.config import load_config
         a = load_config().get("account") or {}
         return a.get("api_url", ""), a.get("production_url") or None
 
@@ -569,43 +648,47 @@ class PetWindow(tk.Tk):
                 return
             AccountClient(api, prod).logout()
             self._acct_refresh()
-            self._flash("已退出账号", C["dim"])
+            self._flash("已退出账号", BRAND["dim"])
             return
         from toolbox.account_ui import login_dialog
         got = login_dialog(self, api, prod)
         self._acct_refresh()
         if got:
-            self._flash(f"登录成功：{got.get('user_id', '?')}", C["accent"])
+            self._flash("登录成功", BRAND["primary"])
+
+    def _mask_phone(self, phone):
+        from toolbox.diagnostics import mask_phone
+        return mask_phone(phone or "")
 
     def _acct_refresh(self):
         from toolbox.account import AccountClient
         api, prod = self._acct_cfg()
         try:
             sess = AccountClient(api, prod).session_summary()
-        except Exception:                      # noqa: BLE001 状态永不杀窗
+        except Exception:                      # noqa: BLE001
             sess = {}
         self._sess = sess or {}
         if sess:
+            uid = str(sess.get("user_id", "?"))
+            short = uid if len(uid) <= 14 else uid[:8] + "…" + uid[-4:]
             self.set_acct_lab.config(
-                text=f"{sess.get('user_id', '?')}（{sess.get('phone', '')}）",
-                fg=C["fg"])
+                text=f"{short} · {self._mask_phone(sess.get('phone')) or '手机未知'}",
+                fg=BRAND["fg"])
             self.acct_btn.config(text="退出")
-            self.side_acct.config(text=str(sess.get('user_id', '?'))[:16],
-                                  fg=C["fg"])
+            self.side_acct.config(text=short, fg=BRAND["fg"])
         else:
-            self.set_acct_lab.config(text="未登录", fg=C["dim"])
+            self.set_acct_lab.config(text="未登录", fg=BRAND["dim"])
             self.acct_btn.config(text="登录")
-            self.side_acct.config(text="未登录", fg=C["dim"])
+            self.side_acct.config(text="未登录", fg=BRAND["dim"])
         self._env_refresh()
         if sess:
             self._env_auto()
         self._render_dir()
         self._prereq_refresh()
 
-    # ---------- 三前置（REQ-20261021-001 规则1/方案A L1 体验层）
+    # ---------- 三前置 + 环境 ----------
 
     def _prereq_refresh(self):
-        """后台取数 → 主线程渲染；任何失败只收敛为「未知」，不杀窗。"""
         from toolbox.account import AccountClient
         api, prod = self._acct_cfg()
         if not api:
@@ -619,7 +702,10 @@ class PetWindow(tk.Tk):
                 pre = AccountClient(api, prod).prerequisites()
             except Exception:                  # noqa: BLE001
                 pre = None
-            self.after(0, lambda p=pre: self._render_pre(p or {}))
+            try:
+                self.after(0, lambda p=pre: self._render_pre(p or {}))
+            except (tk.TclError, RuntimeError):
+                pass
         threading.Thread(target=run, daemon=True).start()
 
     def _render_pre(self, pre=None):
@@ -634,20 +720,19 @@ class PetWindow(tk.Tk):
                          ("bind", {"bound": True, "none": False}.get(binding))):
             glyph, color = mark[val]
             name = {"login": "登录", "member": "权益", "bind": "微信"}[key]
-            self.pre_labs[key].config(text=f"{name}{glyph}", fg=C[color])
+            self.pre_labs[key].config(text=f"{name}{glyph}", fg=BRAND[color])
         self._render_env()
-        if binding == "none":                  # 仅明确未绑定才给入口
+        if binding == "none":
             self.bind_btn.pack(side="right")
         else:
             self.bind_btn.pack_forget()
         if binding == "bound":
-            self.set_bind_lab.config(text="微信：已绑定", fg=C["good"])
+            self.set_bind_lab.config(text="微信：已绑定", fg=BRAND["good"])
         elif binding == "none":
-            self.set_bind_lab.config(text="微信：未绑定", fg=C["bad"])
+            self.set_bind_lab.config(text="微信：未绑定", fg=BRAND["bad"])
         else:
             self.set_bind_lab.config(text="微信：未知（服务未返回）",
-                                     fg=C["dim"])
-        # 侧栏权益卡
+                                     fg=BRAND["dim"])
         m = pre.get("member")
         if m is True:
             exp = pre.get("member_expires")
@@ -660,7 +745,6 @@ class PetWindow(tk.Tk):
             self.side_member.config(text="权益 未开通\n后台开通后生效")
         else:
             self.side_member.config(text="权益 ·")
-        # 通知开关（程序置值不回发）
         opt = pre.get("opt_in")
         self._opt_busy["on"] = True
         try:
@@ -683,7 +767,7 @@ class PetWindow(tk.Tk):
                 AccountClient(api, prod).notification_consent(val)
                 self.after(0, lambda: self._flash(
                     "成片通知已开启" if val else "成片通知已关闭（不影响绑定）",
-                    C["accent"]))
+                    BRAND["primary"]))
             except AccountError as e:
                 def back():
                     self._opt_busy["on"] = True
@@ -691,7 +775,7 @@ class PetWindow(tk.Tk):
                         self.opt_in_var.set(not val)
                     finally:
                         self._opt_busy["on"] = False
-                    self._flash(f"通知设置失败：{e}", C["bad"])
+                    self._flash(f"通知设置失败：{e}", BRAND["danger"])
                 self.after(0, back)
         threading.Thread(target=run, daemon=True).start()
 
@@ -700,334 +784,14 @@ class PetWindow(tk.Tk):
         api, prod = self._acct_cfg()
         try:
             binding_dialog(self, api, prod)
-        except Exception as e:                  # noqa: BLE001 绑定失败不杀主窗
+        except Exception as e:                  # noqa: BLE001
             LOG.warning("绑定对话框异常：%s", e)
-            self._flash("绑定流程异常，请稍后再试", C["warn"])
+            self._flash("绑定流程异常，请稍后再试", BRAND["warn"])
         self._acct_refresh()
 
-    # ---------- 生产状态（工作台卡片；数据后台取）
-
-    def _prod_refresh(self):
-        """后台汇总 folder_watch 状态 → 主线程渲染（新增字节要走目录）。"""
-        import toolbox.folder_watch as fw
-        from toolbox.config import load_config
-
-        def run():
-            out = {}
-            try:
-                wdir = (load_config().get("folder_watch") or {}).get(
-                    "watch_dir") or self.watch_dir
-                out["wdir"] = wdir
-                if wdir:
-                    out["summary"] = fw.summary()
-                    out["jobs"] = fw.jobs_view()   # 任务列表(状态/序)
-                    out["last_ts"] = fw.last_production_ts()
-                    out["due"] = fw.production_due(boot=False)
-                    out["added"] = fw.new_recordings_bytes(wdir)
-                    out["limit"] = fw.threshold_bytes()
-            except Exception as e:              # noqa: BLE001 状态卡永不杀窗
-                LOG.info("生产状态汇总失败：%s", e)
-            self.after(0, lambda o=out: self._render_prod(o))
-        threading.Thread(target=run, daemon=True).start()
-
-    def _render_prod(self, prod=None):
-        if prod is not None:
-            self._prod = prod
-        prod, pre = self._prod, self._pre
-        q = prod.get("summary") or {}
-        self.queue_lab.config(
-            text=(f"排队 {q.get('queued', 0)} · 处理中 "
-                  f"{q.get('running', 0)} · 完成 {q.get('done', 0)}"
-                  + (f" · 失败 {len(q.get('failed', []))}"
-                     if q.get("failed") else "")) if q else "还没有任务")
-        self._render_queue_rows(prod.get("jobs") or [])
-        self.works_lab.config(text=self._works_text(prod, q))
-        # 工作台徽标链：目录 → 登录 → 绑定 → 权益 → 生产窗口
-        api, _ = self._acct_cfg()
-        badge, detail, act, cmd = "…", "", None, None
-        if not prod.get("wdir"):
-            badge, detail = "选择录像文件夹", "点「更换文件夹」选好目录，之后就全自动了"
-        elif api and not pre.get("logged_in"):
-            badge, detail = "未登录", "登录后就会自动为你剪辑（每天到点自动开始）"
-            act, cmd = "去登录", self._acct_click
-        elif pre.get("binding") == "none":
-            badge, detail = "微信还没绑定", "绑定微信后今天就帮你补上"
-            act, cmd = "去绑定", self._bind_click
-        elif pre.get("member") is False:
-            badge, detail = "还没有开通权益", "联系大师姐开通，开通后自动生效"
-        elif q.get("running"):
-            badge, detail = "剪辑中…", "正在处理你的录像，完成后自动出候选"
-        elif prod.get("last_ts") and prod.get("due") and \
-                not prod["due"][0] and "窗口内已生产" in prod["due"][1]:
-            t = time.strftime("%H:%M", time.localtime(prod["last_ts"]))
-            badge, detail = f"今天已出片 {t}", "候选在「我的作品」；明天还会继续"
-            act, cmd = "看作品", lambda: self._nav("works")
-        elif prod.get("added") is not None:
-            gb = prod["added"] / 1e9
-            hit = prod["added"] > prod.get("limit", 2e9)
-            badge = "已达标，等自动剪辑" if hit else "录像还不够"
-            detail = (f"最近一天新增录像 {gb:.2f}GB"
-                      + ("，够了！到点自动开始剪辑" if hit
-                         else "，再录一点吧（要超过 2GB 才开始剪）"))
-        self.prod_badge.config(text=badge)
-        color = {"未登录": C["bad"], "微信还没绑定": C["warn"],
-                 "还没有开通权益": C["bad"], "剪辑中…": C["accent"],
-                 "选择录像文件夹": C["dim"], "录像还不够": C["dim"]}.get(
-                     badge, C["good"] if "已生产" in badge else BRAND["primary"])
-        self.prod_badge.config(fg=color)
-        self.prod_detail.config(text=detail)
-        if act:
-            self.prod_act.config(text=act, command=cmd)
-            self.prod_act.pack()
-        else:
-            self.prod_act.pack_forget()
-        self._render_dir()
-
-    def _works_text(self, prod, q):
-        """我的作品页状态行（真实数据；三选一在作品页完成）。文案面向
-        客户——不带契约编号/内部术语（用户反馈 2026-10-21）。"""
-        if not prod.get("wdir"):
-            return ("先在工作台选好录像文件夹，之后每天会自动为你剪出候选。\n"
-                    "每条候选都可以在这里打开作品页查看")
-        if prod.get("last_ts"):
-            t = time.strftime("%m-%d %H:%M", time.localtime(prod["last_ts"]))
-            base = f"最近一次出片：{t}（已出 {q.get('done', 0)} 场）"
-        else:
-            base = "还没有作品。录像足够后（近 24 小时新增超过 2GB）会自动为你剪辑"
-        return base + "\n每天最多剪出 3 条候选，点「打开作品页」去挑一条最好的"
-
-    STATE_TXT = {"queued": "排队中", "running": "处理中", "done": "已完成"}
-
-    def _render_queue_rows(self, jobs):
-        """任务列表(REQ-20261022-002):状态徽标+场次名+删除钮,入队序。
-        上限显示 8 行,余量以「…共 N 个」收尾;删除只移队列记录不动文件。"""
-        for w in self.queue_rows.winfo_children():
-            w.destroy()
-        if not jobs:
-            tk.Label(self.queue_rows, text="（空）", bg=BRAND["card"],
-                     fg=C["dim"], font=(FONT, 8)).pack(anchor="w")
-            return
-        for i, j in enumerate(jobs[:8], 1):
-            row = tk.Frame(self.queue_rows, bg=BRAND["card"])
-            row.pack(fill="x")
-            st = j["state"]
-            stc = {"running": BRAND["primary"], "done": C["good"],
-                   "failed": C["bad"]}.get(st, C["warn"])
-            tk.Label(row, text=f"{i}.", bg=BRAND["card"], fg=C["dim"],
-                     font=(FONT, 8), width=2).pack(side="left")
-            tk.Label(row, text=self.STATE_TXT.get(st, st), bg=BRAND["card"],
-                     fg=stc, font=(FONT, 8), width=5).pack(side="left")
-            name = j["session"]
-            tk.Label(row, text=name[:22] + ("…" if len(name) > 22 else ""),
-                     bg=BRAND["card"], fg=C["fg"], font=(FONT, 9),
-                     anchor="w").pack(side="left", fill="x", expand=True)
-            ttk.Button(row, text="删除", width=4,
-                       command=lambda k=j["key"]: self._queue_remove(k)
-                       ).pack(side="right")
-        if len(jobs) > 8:
-            tk.Label(self.queue_rows, text=f"…共 {len(jobs)} 个任务",
-                     bg=BRAND["card"], fg=C["dim"],
-                     font=(FONT, 8)).pack(anchor="w")
-
-    def _queue_remove(self, key):
-        """删减任务(REQ-20261022-002):只移队列记录,不动磁盘录像。"""
-        import toolbox.folder_watch as fw
-        j = fw.remove(key)
-        if j:
-            self._flash(f"已移除任务:{j['session'][:20]}", C["dim"])
-        self._prod_refresh()
-
-    def _open_portal(self):
-        """打开作品页:account.portal_url（显式配置）→ 最近一场真实成片的
-        works_url（REQ-20261021-005 轮询期间落盘）→ 提示尚无作品。
-        2026-10-22 用户要求:不再有 demo 视频发给用户看的环节。"""
-        from toolbox.uploader import works_full_url
-        cfg = load_config()
-        url = ((cfg.get("account") or {}).get("portal_url") or "").strip()
-        if not url:
-            last = self._load_last_works()
-            origin = ((cfg.get("server") or {}).get("upload_url")
-                      or "").strip()
-            url = works_full_url(origin, last.get("works_url") or "")
-        if not url:
-            self._flash("还没有作品可看：剪辑完成后会自动生成作品页", C["warn"])
-            return
-        webbrowser.open(url)
-
-    def _load_last_works(self):
-        try:
-            d = json.loads(LAST_WORKS.read_text(encoding="utf-8"))
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            return {}
-
-    def _save_last_works(self, session, works_url):
-        """记住最近一场成片的作品页地址(打开作品页入口用)。"""
-        if not works_url:
-            return
-        try:
-            LAST_WORKS.parent.mkdir(parents=True, exist_ok=True)
-            LAST_WORKS.write_text(json.dumps(
-                {"session": session, "works_url": works_url,
-                 "ts": time.time()}, ensure_ascii=False, indent=1),
-                encoding="utf-8")
-        except OSError as e:
-            LOG.info("作品页地址落盘失败:%s", e)
-
-    def _render_dir(self):
-        # 内存值优先（用户刚选择=最新意图），config 兜底（启动时从配置来）
-        wdir = self.watch_dir or (load_config().get("folder_watch") or {}).get(
-            "watch_dir")
-        short = str(wdir) if len(str(wdir)) <= 46 else str(wdir)[:44] + "…"
-        self.dir_lab.config(text=short or "未选择",
-                            fg=C["fg"] if wdir else C["dim"])
-        self.set_dir_lab.config(text=f"录像目录：{short or '未选择'}")
-
-    def _all_refresh(self):
-        self._prereq_refresh()
-        self._prod_refresh()
-
-    # ---------- 目录唯一选择入口（IDEA-003/REQ-20261021-001）
-
-    def _browse(self):
-        d = filedialog.askdirectory(initialdir=str(ROOT / "video"),
-                                    title="选择录像目录（后台每 2h 自动扫描）")
-        if d:
-            self._set_watch_dir(str(Path(d)))
-
-    def _set_watch_dir(self, d):
-        """所选目录即后台监控目录（唯一入口）：写内存+config 持久保存，
-        日任务循环 10 分钟内接管（IDEA-003 交互细则）。"""
-        if self.watch_dir == d:
-            return
-        self.watch_dir = d
-        try:
-            from toolbox.config import persist_watch_dir
-            persist_watch_dir(d)
-            LOG.info("监控目录已设置：%s", d)
-        except Exception as e:                  # noqa: BLE001 持久化失败不拦选目录
-            LOG.warning("watch_dir 持久化失败（本次运行仍生效）：%s", e)
-        self._save_hist()
-        self._render_dir()
-        self._flash("录像目录已设置，后台每 2 小时自动扫描", C["accent"])
-        self._prod_refresh()
-
-    # ---------- 目录监控（后台日任务，REQ-20261019-013；
-    #             扫描/生产分离 REQ-20261021-001 规则 2-4）
-    #
-    # 每 scan_interval_min（默认 120 分钟）扫描稳定入队（扫描≠生产）；
-    # 生产触发 = 每日 daily_hour（默认 04:00）或开机补跑（24h 未生产即查，
-    # 条件不豁免），滚动 24h 窗口内只触发一次（last_production_ts 持久化
-    # 于 .folder_watch.json；服务端建组窗口 409 为最终权威）。触发门槛 =
-    # 近 24h 新增录像严格 > threshold_gb（默认 2，十进制 GB，mtime 终值
-    # 口径）；不足阈值不生产、当日权益照算（规则 5）。绑定门（方案A L1）
-    # 未过 = 暂缓不记窗口，绑定完成后窗口内重试。
-
-    def _daily_start(self):
-        if self.daily_thread and self.daily_thread.is_alive():
-            return
-        self.daily_stop.clear()
-        self.daily_thread = threading.Thread(target=self._daily_loop,
-                                             daemon=True)
-        self.daily_thread.start()
-
-    def _daily_loop(self):
-        import toolbox.folder_watch as fw
-        from toolbox.config import load_config
-        cfg = load_config().get("folder_watch") or {}
-        hour = int(cfg.get("daily_hour", 4))
-        scan_min = int(cfg.get("scan_interval_min", 120))
-        LOG.info("后台日任务就绪（每 %d 分钟扫描入队；生产=每日 %02d:00 "
-                 "或开机补跑，滚动 24h 一次，近 24h 新增>%.0fGB 触发；"
-                 "未配置目录则等待选择）",
-                 scan_min, hour, float(cfg.get("threshold_gb", 2)))
-        boot = {"done": False}      # 开机补跑时刻只查一次（规则 4）
-        next_scan = 0.0             # 首 tick 即扫（开机补扫停机期间稳定的）
-        while not self.daily_stop.is_set():
-            # 目录唯一入口（IDEA-003）可运行中改选：每拍重读，10 分钟内接管
-            wdir = (load_config().get("folder_watch") or {}).get(
-                "watch_dir") or self.watch_dir
-            if wdir:
-                # ① 扫描节拍（每 2h，稳定入队；扫描≠生产——规则 2）
-                if time.time() >= next_scan:
-                    try:
-                        new = fw.scan(wdir)
-                        if new:
-                            LOG.info("扫描入队：%d 个新目标", new)
-                    except Exception as e:          # noqa: BLE001 扫描失败不杀线程
-                        LOG.warning("扫描失败：%s", e)
-                    next_scan = time.time() + scan_min * 60
-                # ② 生产判定（滚动 24h 窗口 + 阈值严格 >，规则 3/4/5）
-                due, why = fw.production_due(hour, boot=not boot["done"])
-                if due:
-                    boot["done"] = True
-                    # L1 预检（方案A §2）：明确未绑定 → 暂缓不记生产窗口，
-                    # 绑定完成后窗口内自动重试（10 分钟粒度）
-                    gate = self._bind_gate()
-                    if gate:
-                        LOG.warning("生产暂缓：%s", gate)
-                        self.after(0, lambda g=gate: self._flash(
-                            f"生产前置未满足：{gate}", C["warn"]))
-                    else:
-                        added = fw.new_recordings_bytes(wdir)
-                        limit = fw.threshold_bytes()
-                        if added > limit:           # 严格 >（等于/低于不启动）
-                            LOG.info("生产开始（%s）：近 24h 新增 %.2fGB > "
-                                     "%.0fGB", why, added / 1e9, limit / 1e9)
-                            self.after(0, lambda: self._tray_tip("生产中"))
-                            try:
-                                n_ok, n_fail = self._daily_pass(wdir)
-                                LOG.info("生产完成：成功 %d / 失败 %d",
-                                         n_ok, n_fail)
-                                if n_ok or n_fail:
-                                    self.after(0, lambda ok=n_ok, fl=n_fail:
-                                               self._flash(
-                                                   f"生产完成：成{ok} 败{fl}"
-                                                   "（详见 pet.log）",
-                                                   C["warn"] if fl else C["dim"]))
-                            except Exception as e:  # noqa: BLE001 单轮失败不杀线程
-                                LOG.warning("生产失败：%s", e)
-                        else:
-                            # 规则 5：无新录像/不足阈值不生产，当日权益照算
-                            LOG.info("生产跳过（%s）：近 24h 新增 %.2fGB ≤ "
-                                     "%.0fGB，当日权益照算", why, added / 1e9,
-                                     limit / 1e9)
-                        fw.mark_production_run()   # 生产时刻消耗（含跳过）
-                    self.after(0, self._prod_refresh)
-            self.daily_stop.wait(timeout=600)   # 10 分钟粒度复查窗口/绑定门
-
-    def _bind_gate(self):
-        """L1 绑定预检：仅当「明确未绑定」（wechat-binding 返回 none）拦下；
-        未知（服务端未返回/网络失败/未登录）不拦——登录门控由识别链路
-        require_login 负责（REQ-20260919-013），权威判断在 C2S-12 服务端。
-        返回暂缓原因文案或 ""。"""
-        api, prod = self._acct_cfg()
-        if not api:
-            return ""                            # 内部机不门控
-        from toolbox.account import AccountClient
-        try:
-            pre = AccountClient(api, prod).prerequisites()
-        except Exception:                        # noqa: BLE001 预检失败放行
-            return ""
-        if pre.get("logged_in") and pre.get("binding") == "none":
-            return "微信还没绑定（在「账号设置」里绑定后，今天就帮你补上）"
-        return ""
-
-    # ---------- 环境检测(REQ-20261022-005:替换新手教程)
-    #
-    # 登录后自动跑一次(每账号 7 天内不重复自动跑,手动「重新检测」随时可跑):
-    # 系统/磁盘/视频工具实测 + 用 demo 素材真实解码与画面识别,结论落在
-    # 「开始剪辑的条件」第四项,与登录/权益/微信并列。不发布任何作品、
-    # 不打开作品页、不碰云端生产状态——只是回答「这台电脑能不能剪」。
-    ENV_AUTO_DAYS = 7
-
-    def _env_refresh(self):
-        from toolbox import envcheck
-        self._env = envcheck.last_result()
-        self._render_env()
+    # ---------- 环境检测(REQ-20261022-005) ----------
 
     def _env_result(self):
-        """当前账号的检测结果(磁盘结果若属其他账号视为无结果)。"""
         uid = str((self._sess or {}).get("user_id") or "")
         r = self._env or {}
         if str(r.get("user_id") or uid) != uid:
@@ -1035,35 +799,31 @@ class PetWindow(tk.Tk):
         return r
 
     def _render_env(self):
-        """渲染环境徽标 + 一行摘要;未登录时显示「登录后自动检测」。
-        结果按账号区分:磁盘上的结果若属其他账号(共用电脑换号),按未检测
-        显示,不把上个账号的机器结论算到新账号头上。"""
         from toolbox import envcheck
         logged = bool(self._sess)
         res = self._env_result() if logged else {}
         state = envcheck.result_state(res) if logged else "off"
-        glyph, color = {"off": ("·", C["dim"]), "pass": ("✓", C["good"]),
-                        "warn": ("!", C["warn"]), "fail": ("✗", C["bad"])
-                        }[state]
-        self.pre_labs["env"].config(text=f"环境{glyph}", fg=color)
+        glyph, color = {"off": ("·", "dim"), "pass": ("✓", "good"),
+                        "warn": ("!", "warn"), "fail": ("✗", "bad")}[state]
+        self.pre_labs["env"].config(text=f"环境{glyph}", fg=BRAND[color])
         if not logged:
-            self.env_detail.config(
-                text="登录后自动检测这台电脑能不能稳定剪片（约 1-2 分钟）",
-                fg=C["dim"])
+            self.env_detail.config(text="登录后自动检测这台电脑能不能稳定剪片"
+                                        "（约 1-2 分钟）", fg=BRAND["dim"])
         elif not res:
-            self.env_detail.config(
-                text="本账号还没检测这台电脑，登录后会自动开始（约 1-2 分钟）",
-                fg=C["dim"])
+            self.env_detail.config(text="本账号还没检测这台电脑，登录后会自动开始"
+                                        "（约 1-2 分钟）", fg=BRAND["dim"])
         else:
             self.env_detail.config(text=envcheck.summary_line(res),
-                                   fg=C["dim"])
+                                   fg=BRAND["dim"])
         self.env_btn.config(state="normal" if logged and not self._env_busy
                             else "disabled")
 
+    def _env_refresh(self):
+        from toolbox import envcheck
+        self._env = envcheck.last_result()
+        self._render_env()
+
     def _env_auto(self):
-        """登录后自动检测:同账号 7 天内的结果直接复用(不反复跑 OCR 基准),
-        换账号或过期才重跑。正在剪片时让路(避免抢 CPU 拖慢识别),120 秒
-        后再试。"""
         from toolbox import envcheck
         uid = str((self._sess or {}).get("user_id") or "")
         if not uid or self._env_busy:
@@ -1082,17 +842,16 @@ class PetWindow(tk.Tk):
 
     def _env_click(self):
         if not self._sess:
-            self._flash("登录后会自动检测环境", C["warn"])
+            self._flash("登录后会自动检测环境", BRAND["warn"])
             return
         if self._env_busy:
             return
         if self._env_result():
-            self._env_dialog()          # 有结果:先给详情,详情里可重新检测
+            self._env_dialog()
         else:
             self._env_run(manual=True)
 
     def _env_run(self, manual=True):
-        """后台跑完整检测;进度写「开始剪辑的条件」摘要行,结束刷新徽标。"""
         if self._env_busy:
             return
         self._env_busy = True
@@ -1102,10 +861,9 @@ class PetWindow(tk.Tk):
                                   or {}).get("watch_dir")
         uid = str((self._sess or {}).get("user_id") or "")
         t0 = time.time()
-        self._flash("开始检测这台电脑…", C["accent"])
+        self._flash("开始检测这台电脑…", BRAND["primary"])
 
         def _ui(fn):
-            """后台线程 → 主线程;窗口已关(TclError/RuntimeError)时静默放弃。"""
             try:
                 self.after(0, fn)
             except (tk.TclError, RuntimeError):
@@ -1114,23 +872,22 @@ class PetWindow(tk.Tk):
         def progress(frac, text):
             _ui(lambda t=text, f=frac: self.env_detail.config(
                 text=f"{t}（{int(max(0.0, min(1.0, f)) * 100)}%）",
-                fg=C["accent"]))
+                fg=BRAND["primary"]))
 
         def run():
             try:
                 res = envcheck.run(progress=progress, watch_dir=wdir,
                                    user_id=uid)
-            except Exception as e:              # noqa: BLE001 检测失败不杀窗
+            except Exception as e:              # noqa: BLE001
                 LOG.warning("环境检测异常:%s", e)
                 res = None
             _ui(lambda r=res: self._env_done(r, t0, manual))
         threading.Thread(target=run, daemon=True, name="envcheck").start()
 
     def _env_done(self, result, t0, manual):
-        from toolbox import envcheck
         self._env_busy = False
         if not result:
-            self._flash("环境检测出错了，稍后可再点「重新检测」", C["bad"],
+            self._flash("环境检测出错了，稍后可再点「重新检测」", BRAND["danger"],
                         sticky=True)
             self._render_env()
             return
@@ -1139,24 +896,24 @@ class PetWindow(tk.Tk):
         cost = int(time.time() - t0)
         if result.get("incomplete"):
             self._flash("环境检测未完成（体验素材下载失败），"
-                        "检查网络后点「重新检测」", C["warn"], sticky=True)
+                        "检查网络后点「重新检测」", BRAND["warn"], sticky=True)
             self._tray_tip("环境检测未完成")
         elif result.get("ok"):
             head = ("环境检测通过" if not result.get("warn")
                     else f"环境可用（{result.get('warn')} 项提示）")
-            self._flash(f"{head}，用时 {cost} 秒", C["good"], sticky=True)
+            self._flash(f"{head}，用时 {cost} 秒", BRAND["good"], sticky=True)
             self._tray_tip("环境检测通过")
             if manual:
                 self._env_dialog()
         else:
             bad = "、".join(i["label"] for i in result.get("items", [])
                             if i.get("level") == "bad")
-            self._flash(f"环境检测发现问题：{bad}", C["bad"], sticky=True)
+            self._flash(f"环境检测发现问题：{bad}", BRAND["danger"],
+                        sticky=True)
             self._tray_tip("环境检测异常")
             self._env_dialog()
 
     def _env_dialog(self):
-        """检测详情(模态):六项结果 + 预计耗时 + 重新检测/关闭。"""
         from toolbox import envcheck
         r = self._env_result()
         win = tk.Toplevel(self)
@@ -1164,55 +921,467 @@ class PetWindow(tk.Tk):
         win.resizable(False, False)
         win.configure(bg=BRAND["page"])
         win.transient(self)
-        f = ttk.Frame(win, padding=(16, 12))
+        f = ttk.Frame(win, padding=(dpi.px(16), dpi.px(12)))
         f.pack(fill="both", expand=True)
         head = ("检测未完成" if r.get("incomplete")
                 else "环境可用" if r.get("ok") else "这台电脑暂时不能剪片")
-        color = (C["warn"] if r.get("incomplete")
-                 else C["good"] if r.get("ok") else C["bad"])
+        color = (BRAND["warn"] if r.get("incomplete")
+                 else BRAND["good"] if r.get("ok") else BRAND["danger"])
         tk.Label(f, text=head, bg=BRAND["page"], fg=color,
-                 font=(FONT, 12, "bold")).pack(anchor="w")
+                 font=F_DIALOG).pack(anchor="w")
         if r.get("checked_at"):
             tk.Label(f, text=f"检测时间 {r['checked_at']}",
-                     bg=BRAND["page"], fg=C["dim"], font=(FONT, 8)).pack(
-                anchor="w")
-        for icon, text in envcheck.detail_lines(r):
+                     bg=BRAND["page"], fg=BRAND["dim"],
+                     font=F_SMALL).pack(anchor="w")
+        for icon_ch, text in envcheck.detail_lines(r):
             row = tk.Frame(f, bg=BRAND["page"])
-            row.pack(fill="x", pady=1)
-            tk.Label(row, text=icon, bg=BRAND["page"],
-                     fg={"✓": C["good"], "!": C["warn"], "✗": C["bad"]}.get(
-                         icon, C["dim"]),
+            row.pack(fill="x", pady=dpi.px(1))
+            tk.Label(row, text=icon_ch, bg=BRAND["page"],
+                     fg={"✓": BRAND["good"], "!": BRAND["warn"],
+                         "✗": BRAND["danger"]}.get(icon_ch, BRAND["dim"]),
                      font=(FONT, 9, "bold"), width=2).pack(side="left")
-            tk.Label(row, text=text, bg=BRAND["page"], fg=C["fg"],
-                     font=(FONT, 9), anchor="w",
-                     wraplength=400, justify="left").pack(side="left",
-                                                         fill="x",
-                                                         expand=True)
+            tk.Label(row, text=text, bg=BRAND["page"], fg=BRAND["fg"],
+                     font=F_BODY, anchor="w", wraplength=dpi.px(400),
+                     justify="left").pack(side="left", fill="x", expand=True)
         est = (r.get("estimate") or {}).get("min_per_30")
         if est:
             tk.Label(f, text="说明：识别耗时按每秒 1 帧、多进程并行估算；"
                              "真实链路只识别画面局部，通常更快。",
-                     bg=BRAND["page"], fg=C["dim"], font=(FONT, 8),
-                     wraplength=420, justify="left").pack(anchor="w",
-                                                          pady=(6, 0))
+                     bg=BRAND["page"], fg=BRAND["dim"], font=F_SMALL,
+                     wraplength=dpi.px(420), justify="left").pack(
+                anchor="w", pady=(dpi.px(6), 0))
         if not r.get("ok"):
             tk.Label(f, text="可以先按上面的提示处理；处理不了就把这张单子"
                              "截图发给大师姐。",
-                     bg=BRAND["page"], fg=C["warn"], font=(FONT, 8),
-                     wraplength=420, justify="left").pack(anchor="w",
-                                                          pady=(4, 0))
-        row = ttk.Frame(f)
-        row.pack(fill="x", pady=(10, 0))
-        ttk.Button(row, text="重新检测", width=10,
-                   command=lambda: (win.destroy(), self._env_run(True))
-                   ).pack(side="left", padx=(0, 8))
-        ttk.Button(row, text="关闭", width=8,
-                   command=win.destroy).pack(side="left")
+                     bg=BRAND["page"], fg=BRAND["warn"], font=F_SMALL,
+                     wraplength=dpi.px(420), justify="left").pack(
+                anchor="w", pady=(dpi.px(4), 0))
+        row = tk.Frame(f)
+        row.pack(fill="x", pady=(dpi.px(10), 0))
+        ui_kit.button(row, "重新检测", lambda: (win.destroy(),
+                                              self._env_run(True)),
+                      kind="brand").pack(side="left", padx=(0, dpi.px(8)))
+        ui_kit.button(row, "关闭", win.destroy,
+                      kind="brand").pack(side="left")
         win.wait_visibility()
         win.grab_set()
 
+    # ---------- 生产状态 ----------
+
+    def _prod_refresh(self):
+        import toolbox.folder_watch as fw
+
+        def run():
+            out = {}
+            try:
+                wdir = (load_config().get("folder_watch") or {}).get(
+                    "watch_dir") or self.watch_dir
+                out["wdir"] = wdir
+                if wdir:
+                    out["summary"] = fw.summary()
+                    out["jobs"] = fw.jobs_view()
+                    out["last_ts"] = fw.last_production_ts()
+                    out["due"] = fw.production_due(boot=False)
+                    out["added"] = fw.new_recordings_bytes(wdir)
+                    out["limit"] = fw.threshold_bytes()
+                    out["next_scan_ts"] = fw.next_scan_ts()
+                    out["progress"] = fw.running_progress()
+                    out["scan"] = fw.scan_stats(wdir)
+            except Exception as e:              # noqa: BLE001
+                LOG.info("生产状态汇总失败：%s", e)
+            out["produce"] = dict(self._produce)
+            out["last_works"] = self._load_last_works()
+            try:
+                self.after(0, lambda o=out: self._render_prod(o))
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=run, daemon=True).start()
+
+    def _cloud_state(self, prod):
+        """-> ("running"|"done"|"failed"|"", 详情)。仅依据 produce 快照。"""
+        prods = prod.get("produce") or {}
+        for session, v in prods.items():
+            st = (v or {}).get("state")
+            if st in ("waiting", "processing"):
+                return "running", session
+            if st == "failed":
+                return "failed", (v or {}).get("error") or ""
+        lw = prod.get("last_works") or {}
+        try:
+            ts = float(lw.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if lw.get("works_url") and time.time() - ts < 86400:
+            return "done", time.strftime("%H:%M", time.localtime(ts))
+        return "", ""
+
+    def _render_prod(self, prod=None):
+        if prod is not None:
+            self._prod = prod
+        prod, pre = self._prod, self._pre
+        q = prod.get("summary") or {}
+        self.queue_lab.config(
+            text=(f"排队 {q.get('queued', 0)} · 处理中 "
+                  f"{q.get('running', 0)} · 已完成 {q.get('done', 0)}"
+                  + (f" · 失败 {len(q.get('failed', []))}"
+                     if q.get("failed") else "")) if q
+            else "本机处理队列")
+        self._render_queue_rows(prod)
+
+        api, _ = self._acct_cfg()
+        cloud, cloud_detail = self._cloud_state(prod)
+        badge, detail, act, cmd = "…", "", None, None
+        if not prod.get("wdir"):
+            badge, detail = "选择录像文件夹", "点「更换文件夹」选好目录，之后就全自动了"
+        elif api and not pre.get("logged_in"):
+            badge, detail = "未登录", "登录后就会自动为你剪辑（每天到点自动开始）"
+            act, cmd = "去登录", self._acct_click
+        elif pre.get("binding") == "none":
+            badge, detail = "微信还没绑定", "绑定微信后今天就帮你补上"
+            act, cmd = "去绑定", self._bind_click
+        elif pre.get("member") is False:
+            badge, detail = "还没有开通权益", "联系大师姐开通，开通后自动生效"
+        elif q.get("running") or cloud == "running":
+            pr = prod.get("progress") or {}
+            if q.get("running") and pr.get("stage"):
+                badge = "剪辑中…"
+                detail = (f"正在处理本机录像：{pr.get('stage')}"
+                          f"（第 {pr.get('index', 1)}/{pr.get('total', 9)} 步）")
+            elif cloud == "running":
+                badge = "云端生成中…"
+                detail = "录像已上传，云端正在生成 3 条候选（约 20 分钟）"
+            else:
+                badge, detail = "剪辑中…", "正在处理你的录像，完成后自动出候选"
+            act, cmd = "看队列", lambda: self._pages["home"].scroll_top()
+        elif cloud == "done":
+            badge = f"今天已出片 {cloud_detail}"
+            detail = "候选已生成，去「我的作品」打开作品页挑一条"
+            act, cmd = "看作品", lambda: self._nav("works")
+        elif cloud == "failed":
+            badge = "云端生成失败"
+            detail = ("云端没能生成成片（本机录像与队列不受影响）。"
+                      f"{str(cloud_detail)[-80:]}")
+            act, cmd = "复制诊断信息", self._copy_diag
+        elif prod.get("last_ts"):
+            t = time.strftime("%H:%M", time.localtime(prod["last_ts"]))
+            badge = "结果待确认"
+            detail = (f"本机 {t} 已处理并提交，云端成片尚未确认；"
+                      "有结果后这里会显示「今天已出片」")
+        elif prod.get("added") is not None:
+            gb = prod["added"] / 1e9
+            hit = prod["added"] > prod.get("limit", 2e9)
+            badge = "已达标，等自动剪辑" if hit else "录像还不够"
+            detail = (f"最近一天新增录像 {gb:.2f}GB"
+                      + ("，够了！到点自动开始剪辑" if hit
+                         else "，再录一点吧（要超过 2GB 才开始剪）"))
+            due = prod.get("due") or (False, "")
+            if not hit and due[1]:
+                detail += f"（{due[1]}）"
+        env = self._env_result()
+        if env and not env.get("ok") and badge not in ("剪辑中…",):
+            badge = "环境检测未通过"
+            detail = "点「账号设置 → 环境」看哪一项不行，处理后重新检测"
+            act, cmd = "看检测", self._env_click
+        self.prod_badge.config(text=badge)
+        color = {"未登录": BRAND["bad"], "微信还没绑定": BRAND["warn"],
+                 "还没有开通权益": BRAND["bad"], "剪辑中…": BRAND["primary"],
+                 "云端生成中…": BRAND["primary"], "选择录像文件夹": BRAND["dim"],
+                 "录像还不够": BRAND["dim"], "结果待确认": BRAND["warn"],
+                 "云端生成失败": BRAND["danger"],
+                 "环境检测未通过": BRAND["warn"]}.get(badge, BRAND["good"])
+        self.prod_badge.config(fg=color)
+        self.prod_detail.config(text=detail)
+        if act:
+            self.prod_act.config(text=act, command=cmd)
+            self.prod_act.pack(side="right")
+        else:
+            self.prod_act.pack_forget()
+        self._render_works(prod, cloud, cloud_detail)
+        self._render_dir()
+
+    def _render_works(self, prod, cloud, cloud_detail):
+        """我的作品:真实成片才显示;无作品给空态与下一步(REQ-007 V14)。"""
+        lw = prod.get("last_works") or {}
+        if cloud == "done" and lw.get("works_url"):
+            self.works_empty.pack_forget()
+            self.works_lab.config(
+                text=f"最近一次成片：今天 {cloud_detail}\n"
+                     "3 条候选已生成，点右侧打开作品页挑一条最好的",
+                fg=BRAND["fg"])
+            self.works_btn.pack(side="right")
+            self.works_btn.config(state="normal")
+            return
+        if cloud == "running":
+            self.works_empty.pack_forget()
+            self.works_lab.config(text="云端正在生成 3 条候选（约 20 分钟）\n"
+                                       "完成后点右侧打开作品页挑选",
+                                  fg=BRAND["fg"])
+            self.works_btn.pack(side="right")
+            self.works_btn.config(state="disabled")
+            return
+        for w in self.works_empty.winfo_children():
+            w.destroy()
+        box = ui_kit.empty_state(
+            self.works_empty, "还没有真实成片",
+            ("先在工作台选好录像文件夹，之后每天会自动为你剪出候选"
+             if not prod.get("wdir") else
+             "录像足够后（近 24 小时新增超过 2GB）会自动开始剪辑；"
+             "剪好之前这里不会有内容"))
+        box.pack(fill="x", pady=dpi.px(4))
+        self.works_empty.pack(fill="x")
+        self.works_lab.config(text="", fg=BRAND["dim"])
+        self.works_btn.pack(side="right")
+        self.works_btn.config(state="disabled")
+
+    def _wait_reason(self, j, prod):
+        import toolbox.folder_watch as fw
+        st = j.get("state")
+        if st == "running":
+            pr = prod.get("progress") or {}
+            if pr.get("session") == j.get("session") and pr.get("stage"):
+                return f"{pr['stage']}（第 {pr.get('index', 1)}/" \
+                       f"{pr.get('total', 9)} 步）"
+            return "正在识别本机录像…"
+        if st == "failed":
+            n = (j.get("note") or "").strip()
+            return ("上次失败：" + n[-90:]) if n else "上次失败：原因未记录"
+        if st == "queued":
+            if not fw.target_stable(j.get("path")):
+                return "等待录像写完（文件还在增长）"
+            nxt = prod.get("next_scan_ts") or 0
+            if nxt > time.time():
+                return ("已就绪，下次自动检查 "
+                        + time.strftime("%H:%M", time.localtime(nxt)))
+            due = prod.get("due")
+            if due and not due[0] and due[1]:
+                return "已就绪，等生产时点：" + due[1]
+            return "已就绪，排在前面任务之后"
+        return (j.get("note") or "").strip()
+
+    def _render_queue_rows(self, prod):
+        jobs = prod.get("jobs") or []
+        box = self.queue_rows
+        for w in box.winfo_children():
+            w.destroy()
+        if not jobs:
+            tk.Label(box, text="还没有任务。选好录像文件夹后，新录像会自动排队。",
+                     bg=BRAND["card"], fg=BRAND["dim"], font=F_SMALL,
+                     anchor="w", justify="left",
+                     wraplength=dpi.px(420)).pack(fill="x", pady=dpi.px(4))
+            return
+        for i, j in enumerate(jobs, 1):
+            row = tk.Frame(box, bg=BRAND["card"])
+            row.pack(fill="x", pady=(0, dpi.px(2)))
+            st = j.get("state")
+            stc = {"running": BRAND["primary"], "done": BRAND["good"],
+                   "failed": BRAND["danger"]}.get(st, BRAND["warn"])
+            tk.Label(row, text=f"{i}.", bg=BRAND["card"], fg=BRAND["faint"],
+                     font=F_SMALL, width=2, anchor="nw").pack(
+                side="left", anchor="n", pady=(dpi.px(1), 0))
+            tk.Label(row, text=self.STATE_TXT.get(st, st), bg=BRAND["card"],
+                     fg=stc, font=F_SMALL, width=5, anchor="nw").pack(
+                side="left", anchor="n", pady=(dpi.px(1), 0))
+            col = tk.Frame(row, bg=BRAND["card"])
+            col.pack(side="left", fill="x", expand=True, anchor="n")
+            name = j.get("session") or ""
+            tk.Label(col, text=name[:26] + ("…" if len(name) > 26 else ""),
+                     bg=BRAND["card"], fg=BRAND["fg"], font=F_BODY,
+                     anchor="w").pack(fill="x")
+            reason = self._wait_reason(j, prod)
+            tk.Label(col, text=reason, bg=BRAND["card"], fg=BRAND["dim"],
+                     font=F_SMALL, anchor="w", justify="left",
+                     wraplength=dpi.px(300)).pack(fill="x")
+            ui_kit.button(row, "移除", lambda k=j.get("key"): self._queue_remove(k),
+                          kind="ghost").pack(side="right")
+        if len(jobs) > 1:
+            tk.Label(box, text=f"共 {len(jobs)} 个任务", bg=BRAND["card"],
+                     fg=BRAND["faint"], font=F_SMALL, anchor="w").pack(
+                fill="x", pady=(dpi.px(2), 0))
+
+    def _queue_remove(self, key):
+        import toolbox.folder_watch as fw
+        if not messagebox.askyesno(
+                "移除任务",
+                "只从队列里移除这次待处理记录，不会删除你的录像文件。\n"
+                "如果录像还在文件夹里，下次扫描可能会重新排队。\n\n确定移除？"):
+            return
+        j = fw.remove(key)
+        if j:
+            self._flash("已从队列移除（录像文件未删除）", BRAND["dim"])
+        self._prod_refresh()
+
+    def _open_portal(self):
+        from toolbox.uploader import works_full_url
+        cfg = load_config()
+        url = ((cfg.get("account") or {}).get("portal_url") or "").strip()
+        if not url:
+            last = self._load_last_works()
+            origin = ((cfg.get("server") or {}).get("upload_url") or "").strip()
+            url = works_full_url(origin, last.get("works_url") or "")
+        if not url:
+            self._flash("还没有真实成片可看：剪辑完成后会自动生成作品页",
+                        BRAND["warn"])
+            return
+        webbrowser.open(url)
+
+    def _render_dir(self):
+        wdir = (self.watch_dir
+                or (load_config().get("folder_watch") or {}).get("watch_dir")
+                or "")
+        wdir = str(wdir)
+        short = wdir if len(wdir) <= 44 else wdir[:42] + "…"
+        self.dir_lab.config(text=short or "未选择",
+                            fg=BRAND["fg"] if wdir else BRAND["dim"])
+        self.set_dir_lab.config(text=f"录像目录：{short or '未选择'}")
+        scan = (self._prod or {}).get("scan") or {}
+        if wdir and scan:
+            self.dir_note.config(
+                text=f"最近检查 {scan.get('last_scan', '未知')} · 发现 "
+                     f"{scan.get('videos', 0)} 个视频 · 待处理 "
+                     f"{scan.get('pending', 0)} 个"
+                     f"（每 {scan.get('interval_min', 120)} 分钟自动检查一次，"
+                     "文件写完才处理）")
+        elif wdir:
+            self.dir_note.config(text="会自动检查新增录像，文件写完才处理")
+        else:
+            self.dir_note.config(text="选一个存放游戏录像的文件夹即可")
+
+    # ---------- 诊断(REQ-20261022-010) ----------
+
+    def _copy_diag(self):
+        from toolbox import diagnostics
+        try:
+            text = diagnostics.build(
+                version.label(), sess=self._sess, pre=self._pre,
+                env=self._env_result(), prod=self._prod,
+                jobs=(self._prod.get("jobs") or []),
+                summary=(self._prod.get("summary") or {}),
+                produce=self._produce,
+                extra_lines=[f"本地队列完成 {len(self._produce)} 条云端记录"])
+            path = diagnostics.save(text)
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            msg = "诊断信息已复制（不含手机号/令牌）"
+            if path:
+                msg += "，也存到 data/diagnostics/last-report.txt"
+            self._flash(msg, BRAND["good"], sticky=True)
+        except Exception as e:                  # noqa: BLE001
+            LOG.warning("诊断生成失败:%s", e)
+            self._flash("诊断信息生成失败，请稍后再试", BRAND["danger"])
+
+    def _all_refresh(self):
+        self._prereq_refresh()
+        self._prod_refresh()
+
+    # ---------- 目录选择 ----------
+
+    def _browse(self):
+        d = filedialog.askdirectory(initialdir=str(ROOT / "video"),
+                                    title="选择录像目录（后台自动扫描）")
+        if d:
+            self._set_watch_dir(str(Path(d)))
+
+    def _set_watch_dir(self, d):
+        if self.watch_dir == d:
+            return
+        self.watch_dir = d
+        try:
+            from toolbox.config import persist_watch_dir
+            persist_watch_dir(d)
+            LOG.info("监控目录已设置：%s", d)
+        except Exception as e:                  # noqa: BLE001
+            LOG.warning("watch_dir 持久化失败（本次运行仍生效）：%s", e)
+        self._save_hist()
+        self._render_dir()
+        self._flash("录像目录已设置，后台会自动检查新增录像", BRAND["primary"])
+        self._prod_refresh()
+
+    # ---------- 后台日任务 ----------
+
+    def _daily_start(self):
+        if self.daily_thread and self.daily_thread.is_alive():
+            return
+        self.daily_stop.clear()
+        self.daily_thread = threading.Thread(target=self._daily_loop,
+                                             daemon=True)
+        self.daily_thread.start()
+
+    def _daily_loop(self):
+        import toolbox.folder_watch as fw
+        cfg = load_config().get("folder_watch") or {}
+        hour = int(cfg.get("daily_hour", 4))
+        scan_min = int(cfg.get("scan_interval_min", 120))
+        LOG.info("后台日任务就绪（每 %d 分钟扫描入队；生产=每日 %02d:00 "
+                 "或开机补跑，滚动 24h 一次，近 24h 新增>%.0fGB 触发；"
+                 "未配置目录则等待选择）",
+                 scan_min, hour, float(cfg.get("threshold_gb", 2)))
+        boot = {"done": False}
+        next_scan = 0.0
+        while not self.daily_stop.is_set():
+            wdir = (load_config().get("folder_watch") or {}).get(
+                "watch_dir") or self.watch_dir
+            if wdir:
+                if time.time() >= next_scan:
+                    try:
+                        new = fw.scan(wdir)
+                        if new:
+                            LOG.info("扫描入队：%d 个新目标", new)
+                    except Exception as e:          # noqa: BLE001
+                        LOG.warning("扫描失败：%s", e)
+                    next_scan = time.time() + scan_min * 60
+                    try:
+                        fw.mark_scan(next_scan)
+                    except Exception:               # noqa: BLE001
+                        pass
+                due, why = fw.production_due(hour, boot=not boot["done"])
+                if due:
+                    boot["done"] = True
+                    gate = self._bind_gate()
+                    if gate:
+                        LOG.warning("生产暂缓：%s", gate)
+                        self.after(0, lambda g=gate: self._flash(
+                            f"生产前置未满足：{g}", BRAND["warn"]))
+                    else:
+                        added = fw.new_recordings_bytes(wdir)
+                        limit = fw.threshold_bytes()
+                        if added > limit:
+                            LOG.info("生产开始（%s）：近 24h 新增 %.2fGB > "
+                                     "%.0fGB", why, added / 1e9, limit / 1e9)
+                            self.after(0, lambda: self._tray_tip("生产中"))
+                            try:
+                                n_ok, n_fail = self._daily_pass(wdir)
+                                LOG.info("生产完成：成功 %d / 失败 %d",
+                                         n_ok, n_fail)
+                                if n_ok or n_fail:
+                                    self.after(0, lambda ok=n_ok, fl=n_fail:
+                                               self._flash(
+                                                   f"本机处理完成：成功{ok} "
+                                                   f"失败{fl}", BRAND["warn"]
+                                                   if fl else BRAND["dim"]))
+                            except Exception as e:  # noqa: BLE001
+                                LOG.warning("生产失败：%s", e)
+                        else:
+                            LOG.info("生产跳过（%s）：近 24h 新增 %.2fGB ≤ "
+                                     "%.0fGB，当日权益照算", why, added / 1e9,
+                                     limit / 1e9)
+                        fw.mark_production_run()
+                    self.after(0, self._prod_refresh)
+            self.daily_stop.wait(timeout=600)
+
+    def _bind_gate(self):
+        api, prod = self._acct_cfg()
+        if not api:
+            return ""
+        from toolbox.account import AccountClient
+        try:
+            pre = AccountClient(api, prod).prerequisites()
+        except Exception:                        # noqa: BLE001
+            return ""
+        if pre.get("logged_in") and pre.get("binding") == "none":
+            return "微信还没绑定（在「账号设置」里绑定后，今天就帮你补上）"
+        return ""
+
     def _daily_pass(self, wdir):
-        """跑完当前全部就绪任务（顺序，单日上限 100 保护）。"""
         import toolbox.folder_watch as fw
         n_ok = n_fail = 0
         for _ in range(100):
@@ -1225,25 +1394,19 @@ class PetWindow(tk.Tk):
                     "后台任务%s：%s%s", "成功" if ok else "失败", session,
                     "" if ok else f"（{log[-200:]}）")
                 if ok:
-                    self._watch_produce(session)   # 成片轮询（REQ-005）
+                    self._watch_produce(session)
         return n_ok, n_fail
 
     def _watch_produce(self, session):
-        """每场跑链成功后跟踪云端成片（REQ-20261021-005）：后台线程轮询
-        produce 状态（60s/次，上限 1h），done → flash+托盘+状态行引导打开
-        作品页；failed → 展示原因。仅账号模式（usr_* 自动排队）有意义；
-        内部机/无 upload_id 静默跳过。"""
+        """跟踪云端成片(REQ-20261021-005/REQ-20261022-008)。"""
         import toolbox.folder_watch as fw
         from toolbox import uploader as _up
-        from toolbox.config import load_config
         cfg = (load_config().get("server") or {})
         if not cfg.get("upload_url") or cfg.get("upload_token"):
-            return                                  # 仅账号模式
+            return
         try:
             from toolbox.transfer import discover_session
             disc = discover_session(session)
-            files = []                              # 仅取签名：重算一次清单
-            # 复用 push 登记的最近 upload_id（同 session+eval）
             reg = {}
             rp = _up._registry_path()
             if rp.is_file():
@@ -1256,14 +1419,13 @@ class PetWindow(tk.Tk):
             upload_id = reg.get(sig) if sig else None
             if not upload_id:
                 return
-        except Exception as e:                      # noqa: BLE001 探测失败跳过
+        except Exception as e:                      # noqa: BLE001
             LOG.info("成片跟踪跳过（%s 场）：%s", session, e)
             return
         api_prod = cfg["upload_url"]
+        self._produce[session] = {"state": "waiting", "ts": time.time()}
 
         def poll():
-            up = _up.ProductionUploader(api_prod, token=None)
-            # 账号模式需要签名;用 require_login 的会话
             try:
                 from toolbox.account import require_login
                 from toolbox import device_identity as di
@@ -1274,45 +1436,58 @@ class PetWindow(tk.Tk):
                     signer=lambda m, w, d: di.sign_request(m, w, d, _b))
             except Exception as e:                  # noqa: BLE001
                 LOG.info("成片跟踪停止（未登录）：%s", e)
+                self._produce.pop(session, None)
                 return
 
             def on_state(s):
-                LOG.info("成片状态（%s）：%s", session,
-                         (s or {}).get("state"))
+                st = (s or {}).get("state")
+                if st in ("waiting", "processing", "done", "failed"):
+                    self._produce[session] = dict(
+                        s or {}, ts=time.time())
+                LOG.info("成片状态（%s）：%s", session, st)
 
             result = up2.wait_produce(upload_id, on_state=on_state)
             state = (result or {}).get("state")
             if state == "done":
-                from toolbox.uploader import works_full_url
                 works = (result or {}).get("works_url", "")
-                url = works_full_url(api_prod, works)
+                self._produce[session] = {"state": "done",
+                                          "works_url": works,
+                                          "ts": time.time()}
                 self._save_last_works(session, works)
-                msg = "成片完成！3 条候选已就绪"
-                LOG.info("%s（%s）", msg, url)
-                self.after(0, lambda: (self._flash(msg + "，点「我的作品」"
-                                                   " →「打开作品页」去挑",
-                                                   C["accent"], sticky=True),
-                                       self._tray_tip("成片完成")))
+                from toolbox.uploader import works_full_url
+                url = works_full_url(api_prod, works)
+                LOG.info("成片完成（%s）", url)
+                self.after(0, lambda: (
+                    self._flash("成片完成！3 条候选已就绪，去「我的作品」"
+                                "打开作品页挑选", BRAND["good"], sticky=True),
+                    self._tray_tip("成片完成"), self._prod_refresh()))
             elif state == "failed":
                 err = (result or {}).get("error") or ""
+                self._produce[session] = {"state": "failed", "error": err,
+                                          "ts": time.time()}
                 LOG.warning("成片生成失败（%s）：%s", session, err[-300:])
-                self.after(0, lambda: self._flash(
-                    "成片生成失败，请重试上传（原始录像不受影响）", C["bad"]))
+                self.after(0, lambda: (self._flash(
+                    "云端生成失败，可在「账号设置」复制诊断信息发给大师姐",
+                    BRAND["danger"], sticky=True), self._prod_refresh()))
+            else:
+                self._produce[session] = {"state": "timeout", "ts": time.time()}
+                self.after(0, lambda: (self._flash(
+                    "云端还没生成完，稍后可在「我的作品」打开作品页查看",
+                    BRAND["warn"], sticky=True), self._prod_refresh()))
 
         threading.Thread(target=poll, daemon=True,
                          name=f"produce-{session[:12]}").start()
 
-    # ---------- 托盘（最小化驻留右下角通知区）
+    # ---------- 托盘 ----------
 
     def _on_unmap(self, _e):
-        # wm_state() 而非 state()：避免与任何同名属性遮蔽 Tk 方法
-        if self.wm_state() == "iconic":         # 区分最小化与程序内 withdraw
+        if self.wm_state() == "iconic":
             self.after(120, self._to_tray)
 
     def _to_tray(self):
         if self.wm_state() != "iconic":
             return
-        self.withdraw()                          # 任务栏不再占位
+        self.withdraw()
         if self.tray is None:
             self._tray_init()
         if self.tray is not None:
@@ -1323,30 +1498,35 @@ class PetWindow(tk.Tk):
             import pystray
             from PIL import Image, ImageDraw
         except ImportError:
-            LOG.info("未装 pystray，最小化停留在任务栏"
-                     "（pip install pystray 可启用托盘驻留）")
+            LOG.info("未装 pystray，最小化停留在任务栏")
             return
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         d.rounded_rectangle([4, 4, 60, 60], radius=14, fill=BRAND["primary"])
-        d.polygon([(26, 20), (26, 44), (48, 32)], fill="#FFFFFF")   # ▶
+        d.polygon([(26, 20), (26, 44), (48, 32)], fill="#FFFFFF")
         menu = pystray.Menu(
             pystray.MenuItem("显示主界面", self._tray_act_show, default=True),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", self._tray_act_quit),
         )
-        self.tray = pystray.Icon("dashijie", img, "陪玩大师姐", menu)
+        self.tray = pystray.Icon("dashijie", img, version.PRODUCT, menu)
         try:
             self.tray.run_detached()
-        except Exception as e:                   # noqa: BLE001 托盘失败不杀主窗
+        except Exception as e:                   # noqa: BLE001
             LOG.warning("托盘启动失败：%s", e)
             self.tray = None
 
     def _tray_act_show(self, *_):
-        self.after(0, self._tray_show)           # pystray 线程 → UI 线程
+        try:
+            self.after(0, self._tray_show)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _tray_act_quit(self, *_):
-        self.after(0, self._on_close)
+        try:
+            self.after(0, self._on_close)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _tray_show(self):
         self.deiconify()
@@ -1359,22 +1539,22 @@ class PetWindow(tk.Tk):
             t, self.tray = self.tray, None
             try:
                 t.stop()
-            except Exception:                    # noqa: BLE001 收尾尽力而为
+            except Exception:                    # noqa: BLE001
                 pass
 
     def _tray_tip(self, text):
         if self.tray is not None:
             try:
-                self.tray.title = f"陪玩大师姐 · {text}"
-            except Exception:                    # noqa: BLE001 提示更新尽力而为
+                self.tray.title = f"{version.PRODUCT} · {text}"
+            except Exception:                    # noqa: BLE001
                 pass
 
-    # ---------- 状态行（常驻一行文字；出错常驻，其余短闪）
+    # ---------- 状态行 ----------
 
     def _show_status(self, text, color=None, sticky=False):
         self._status_text = text
         self._status_sticky = sticky
-        self.status_lab.config(text=text, fg=color or C["dim"])
+        self.status_lab.config(text=text, fg=color or BRAND["dim"])
 
     def _hide_status(self):
         self._status_sticky = False
@@ -1382,13 +1562,12 @@ class PetWindow(tk.Tk):
         self.status_lab.config(text="")
 
     def _flash(self, text, color=None, sticky=False):
-        """状态行短闪（toast），2.5s 后自动收起；sticky=True 常驻到下次动作。"""
-        self._show_status(text, color or C["accent"], sticky=sticky)
+        self._show_status(text, color or BRAND["primary"], sticky=sticky)
         if not sticky:
             self.after(2500, lambda: self._hide_status()
                        if self._status_text == text else None)
 
-    # ---------- 调试快照（PET_SNAPSHOT=<目录> 时各页截屏）
+    # ---------- 调试快照 ----------
 
     def _dev_snapshot(self):
         snapdir = os.environ.get("PET_SNAPSHOT")
@@ -1399,7 +1578,6 @@ class PetWindow(tk.Tk):
         except ImportError:
             return
         Path(snapdir).mkdir(parents=True, exist_ok=True)
-        # tkinter 逻辑坐标 vs ImageGrab 物理像素：按屏幕宽比值换算（DPI≠100%）
         full = ImageGrab.grab()
         k = full.size[0] / max(1, self.winfo_screenwidth())
 
@@ -1428,7 +1606,6 @@ class PetWindow(tk.Tk):
         step()
 
     def _on_close(self):
-        # 后台日任务的跑链子进程树杀（防孤儿烧 CPU）
         if self.daily_thread is not None and self.daily_thread.is_alive():
             import toolbox.folder_watch as fw
             self.daily_stop.set()
@@ -1439,6 +1616,6 @@ class PetWindow(tk.Tk):
 
 
 def run(address=""):
-    """GUI 入口（cli: python -m toolbox pet）。address 已忽略（UI V1 无
-    BV/URL 入口，内部联调走 toolbox pipeline）。"""
+    """GUI 入口。DPI 在 PetWindow.__init__ 内、建窗之前声明。"""
+    dpi.setup()
     PetWindow(address=address).mainloop()

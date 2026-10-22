@@ -135,14 +135,89 @@ try:
                       "due": (False, "窗口内已生产（23h 前）"),
                       "added": 3e9, "limit": 2e9})
     win.update()
-    check("徽标：今天已出片", "已出片" in win.prod_badge.cget("text"))
+    # REQ-20261022-008:只有本机时间戳、无云端确认时不得报「已出片」
+    check("徽标：无云端确认 → 结果待确认(不虚报已出片)",
+          "结果待确认" in win.prod_badge.cget("text")
+          and "已出片" not in win.prod_badge.cget("text"))
     check("通知开关：已绑定可用", str(win.opt_in_chk.cget("state"))
           != "disabled" and win.opt_in_var.get() is True)
+
+    # 云端 produce=done + 最近作品页 → 才显示已出片,作品页按钮可用
+    import time as _t
+    win._produce = {"场次X": {"state": "done", "ts": _t.time(),
+                              "works_url": "/eval/usr_x/preview/x"}}
+    win._last_works = {"session": "场次X", "works_url": "/eval/usr_x/preview/x",
+                       "ts": _t.time()}
+    win._render_prod({"wdir": "D:/录像",
+                      "summary": {"queued": 0, "running": 0, "done": 1,
+                                  "failed": []},
+                      "last_ts": 1234567890, "due": (False, "窗口内已生产"),
+                      "added": 3e9, "limit": 2e9,
+                      "produce": dict(win._produce),
+                      "last_works": dict(win._last_works)})
+    win.update()
+    check("徽标：云端确认后才显示已出片",
+          "已出片" in win.prod_badge.cget("text"))
+    check("作品页：真实成片时按钮可用",
+          str(win.works_btn.cget("state")) == "normal")
+
+    # 队列等待原因与进度(REQ-008 C02)
+    win._render_prod({"wdir": "D:/录像",
+                      "summary": {"queued": 1, "running": 1, "done": 0,
+                                  "failed": []},
+                      "progress": {"session": "场次Y", "stage": "画面识别",
+                                   "index": 4, "total": 9},
+                      "jobs": [{"key": "k1", "session": "场次Y",
+                                "state": "running", "note": "",
+                                "path": "D:/录像/场次Y"},
+                               {"key": "k2", "session": "场次Z",
+                                "state": "failed",
+                                "note": "退出码1：识别失败",
+                                "path": "D:/录像/场次Z"},
+                               {"key": "k3", "session": "场次W",
+                                "state": "queued", "note": "",
+                                "path": "D:/录像/场次W"}],
+                      "produce": {}, "last_works": {},
+                      "next_scan_ts": _t.time() + 3600})
+    win.update()
+    check("队列：处理中显示阶段", "画面识别" in win.prod_detail.cget("text"))
+    rows = [w for w in win.queue_rows.winfo_children()]
+    texts = []
+    for r in rows:
+        for c in r.winfo_children():
+            if hasattr(c, "cget"):
+                try:
+                    texts.append(str(c.cget("text")))
+                except Exception:
+                    pass
+            for cc in getattr(c, "winfo_children", lambda: [])():
+                try:
+                    texts.append(str(cc.cget("text")))
+                except Exception:
+                    pass
+    joined = " | ".join(texts)
+    check("队列：失败显示原因", "识别失败" in joined)
+    check("队列：排队显示等待原因", ("下次自动检查" in joined or "等待" in joined))
+    win._produce = {}
+    win._last_works = {}
 
     win._render_prod({"wdir": "", "summary": {"queued": 0, "running": 0,
                                               "done": 0, "failed": []}})
     win.update()
     check("徽标：未选目录", "选择录像文件夹" in win.prod_badge.cget("text"))
+    # 未配置目录(隔离真实 config,避免本机已有设置干扰)
+    import toolbox.pet as _pm
+    _real_lc = _pm.load_config
+    _pm.load_config = lambda: {"folder_watch": {}}
+    try:
+        win.watch_dir = ""
+        win._render_dir()
+        win.update()
+        check("目录：未配置时不显示 None",
+              "None" not in win.dir_lab.cget("text")
+              and "未选择" in win.dir_lab.cget("text"))
+    finally:
+        _pm.load_config = _real_lc
 
     # 目录设置（persist 已打桩，不写真 config）
     with tempfile.TemporaryDirectory() as td:
