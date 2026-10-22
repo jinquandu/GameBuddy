@@ -298,6 +298,7 @@ class PetWindow(tk.Tk):
         self._status_text = ""
         self._status_sticky = False
         self._page = "home"
+        self.tutorial_busy = False     # 新手教程流程进行中(REQ-20261022-002)
         self._pre = {}          # prerequisites() 最近快照（主线程渲染用）
         self._prod = {}         # 生产状态快照（summary/窗口/新增字节）
 
@@ -379,6 +380,10 @@ class PetWindow(tk.Tk):
         b2 = self._card(home, "今日生产")
         head2 = tk.Frame(b2, bg=BRAND["card"])
         head2.pack(fill="x")
+        # 新手教程入口(REQ-20261022-002):登录后可见;完成后文字变化
+        self.tutorial_btn = ttk.Button(head2, text="新手教程", width=9,
+                                       command=self._tutorial_start)
+        self.tutorial_btn.pack(side="left", padx=(0, 6))
         self.prod_badge = tk.Label(head2, text="…", bg=BRAND["lav"],
                                    fg=BRAND["primary"], font=(FONT, 9),
                                    padx=8, pady=2)
@@ -550,6 +555,8 @@ class PetWindow(tk.Tk):
             self.set_acct_lab.config(text="未登录", fg=C["dim"])
             self.acct_btn.config(text="登录")
             self.side_acct.config(text="未登录", fg=C["dim"])
+        # 教程入口:仅登录后可见(REQ-20261022-002:教程仅要求登录)
+        self.tutorial_btn.config(state="normal" if sess else "disabled")
         self._render_dir()
         self._prereq_refresh()
 
@@ -890,6 +897,126 @@ class PetWindow(tk.Tk):
         if pre.get("logged_in") and pre.get("binding") == "none":
             return "微信还没绑定（在「账号设置」里绑定后，今天就帮你补上）"
         return ""
+
+    # ---------- 新手教程(REQ-20261022-002:~10 分钟全流程体验)
+    #
+    # 真实机制可视化+服务端短路:素材下载→落沙盒→真实扫描入队→队列消费
+    # (folder_watch 对教程会话拦截,不跑识别链)→C2S-16 服务端豁免→
+    # 客户端演出「剪辑中」节奏→结束卡。守卫:不写 last_production_ts、
+    # 不触发真实上传/生产;沙盒在结束卡后清理,可重放。
+
+    TUT_STEPS = ("正在准备体验素材…", "素材就绪,放进录像文件夹…",
+                 "自动扫描发现素材…", "自动剪辑中(体验加速)…",
+                 "出片完成!打开作品页看看")
+
+    def _tutorial_start(self):
+        """入口:登录门控(教程仅要求登录)→后台跑教程流程,UI 逐步反馈。"""
+        api, _ = self._acct_cfg()
+        if not api:
+            self._flash("教程需要账号服务,当前为内部机配置", C["warn"])
+            return
+        if self.tutorial_busy:
+            return
+        self.tutorial_busy = True
+        self.tutorial_btn.config(state="disabled")
+        from toolbox import tutorial as tut
+        wdir = self.watch_dir or (load_config().get("folder_watch")
+                                  or {}).get("watch_dir")
+        if tut.is_done():
+            tut.reset(watch_dir=wdir)          # 重放:清上轮沙盒
+        if not wdir:
+            self._flash("先在工作台选择录像文件夹,再开始教程", C["warn"])
+            self.tutorial_busy = False
+            self.tutorial_btn.config(state="normal")
+            return
+        self._flash(self.TUT_STEPS[0], C["accent"])
+
+        def run():
+            try:
+                # ① 素材下载(断点续传)
+                tut.download_material(progress=lambda f: self.after(
+                    0, lambda f=f: self.prod_detail.config(
+                        text=f"体验素材下载 {int(f*100)}%")))
+                self.after(0, lambda: self._flash(self.TUT_STEPS[1],
+                                                  C["accent"]))
+                # ② 落沙盒(监控目录/新手体验-demo,走真实扫描入队)
+                dst = tut.plant_sandbox(watch_dir=wdir)
+                if dst is None:
+                    self.after(0, lambda: self._flash(
+                        "教程素材未就绪,请重试", C["warn"]))
+                    return
+                # ③ 真实扫描入队(folder_watch 对教程会话消费时短路)
+                import toolbox.folder_watch as fw
+                fw.scan(str(dst.parent))
+                self.after(0, lambda: self._flash(self.TUT_STEPS[2],
+                                                  C["accent"]))
+                time.sleep(2)                  # 让用户看到「排队」一瞬
+                n_ok, _ = self._daily_pass(str(dst.parent))
+                if not n_ok:
+                    self.after(0, lambda: self._flash(
+                        "教程素材未被队列消费,请重试", C["warn"]))
+                    return
+                # ④ C2S-16(服务端豁免三前置,零生产副作用)
+                self.after(0, lambda: self._flash(self.TUT_STEPS[3],
+                                                  C["accent"]))
+                time.sleep(70)                 # 演出「剪辑中」节奏(60-90s)
+                try:
+                    r = tut.call_tutorial_api()
+                    works = (r.get("produce") or {}).get("works_url", "")
+                except Exception as e:          # noqa: BLE001 旧后端/超限降级
+                    LOG.warning("教程 C2S-16 降级:%s", e)
+                    works = ""
+                # ⑤ 收口:出片态+结束卡
+                tut.mark_done()
+                self.after(0, lambda: (self._flash(self.TUT_STEPS[4],
+                                                   C["good"], sticky=True),
+                                       self._tray_tip("教程完成"),
+                                       self._prod_refresh(),
+                                       self.tutorial_btn.config(
+                                           text="再看一遍", state="normal")))
+                if works:
+                    from toolbox.uploader import works_full_url
+                    url = works_full_url(api, works)
+                    self.after(1200, lambda: self._tutorial_finale(url))
+            except Exception as e:              # noqa: BLE001 教程失败不杀主窗
+                LOG.warning("新手教程异常:%s", e)
+                self.after(0, lambda: (self._flash(
+                    "教程流程出错了,请重试", C["bad"]),
+                    self.tutorial_btn.config(state="normal")))
+            finally:
+                self.tutorial_busy = False
+        threading.Thread(target=run, daemon=True,
+                         name="tutorial").start()
+
+    def _tutorial_finale(self, url):
+        """结束卡(模态):总结+跳作品页+衔接真实使用。"""
+        win = tk.Toplevel(self)
+        win.title("新手教程完成")
+        win.resizable(False, False)
+        win.configure(bg=BRAND["page"])
+        win.transient(self)
+        f = ttk.Frame(win, padding=(18, 14))
+        f.pack(fill="both", expand=True)
+        tk.Label(f, text="体验完成!🎉", bg=BRAND["page"], fg=BRAND["deep"],
+                 font=(FONT, 13, "bold")).pack(anchor="w")
+        tk.Label(f, text="刚才的一切——扫描、剪辑、出 3 条候选——"
+                         "以后每天都会自动发生。\n"
+                         "你只需要保持录像文件夹有新录像。",
+                 bg=BRAND["page"], fg=C["fg"], font=(FONT, 10),
+                 justify="left", wraplength=380).pack(anchor="w", pady=(8, 10))
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(0, 6))
+        ttk.Button(row, text="打开作品页(体验内容)", width=22,
+                   command=lambda: webbrowser.open(url)).pack(
+            side="left", padx=(0, 8))
+        ttk.Button(row, text="完成", width=8,
+                   command=win.destroy).pack(side="left")
+        tk.Label(f, text="微信还没绑定的话,记得去「账号设置」绑定,"
+                         "并联系大师姐开通权益。",
+                 bg=BRAND["page"], fg=C["dim"], font=(FONT, 8),
+                 wraplength=380, justify="left").pack(anchor="w")
+        win.wait_visibility()
+        win.grab_set()
 
     def _daily_pass(self, wdir):
         """跑完当前全部就绪任务（顺序，单日上限 100 保护）。"""

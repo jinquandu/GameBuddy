@@ -159,6 +159,7 @@ data/remixes/（手动上传发布）
 | C2S-12 | 生产申请 | 端→账号服务 | HTTPS | `POST /api/account/v1/production-jobs` | **已冻结（1.4.0，未上线）** |
 | C2S-13 | 生产任务查询 | 端→服务端 | HTTPS | `GET /api/production/v1/jobs/<job_id>` | **已冻结（1.4.0，未上线）** |
 | C2S-14 | 受控产物读取 | 端→服务端 | HTTPS | `GET /api/production/v1/jobs/<job_id>/artifacts/<file_id>` | **已冻结（1.4.0，未上线）** |
+| C2S-16 | 新手教程识别 | 端→服务端 | HTTPS | `POST /api/production/v1/tutorial`（登录态；豁免权益/绑定；零生产副作用） | 已实施（1.4.1 补录,REQ-20261022-002） |
 | INT-1 | 原请求身份核验 | cut_server→账号服务 | 内部互信 HTTPS | `POST /internal/v1/account/authorize` | **已冻结（1.4.0，未上线）** |
 | INT-2 | 生产任务提交/查重 | 账号服务→cut_server | 内部互信 HTTPS | `POST /internal/v1/production/jobs` | **已冻结（1.4.0，未上线）** |
 | INT-3 | 上传回执查询 | 账号服务→cut_server | 内部互信 HTTPS | `GET /internal/v1/production/uploads/<upload_id>/receipt` | **已冻结（1.4.0，未上线）** |
@@ -600,6 +601,22 @@ body_sha256 必须由 cut_server 根据实际原请求正文计算；账号侧�
   为准；租户 token 时期（1.3.0）仅有 `tenant` 字段，鉴权层置换时补齐，
   不改变既有回执字段。
 
+### C2S-16 新手教程识别（1.4.1 补录，REQ-20261022-002）
+
+```
+POST /api/production/v1/tutorial      Authorization: Bearer <登录会话>（DSJ-PC-1 五头）
+→ 200 {"tutorial": true, "produce": {"state": "done",
+        "works_url": "/eval/demo/preview/<demo场次>"}}
+```
+
+- **鉴权**：复用账号模式(INT-1 核验);**仅要求登录**——豁免权益与微信绑定
+  三前置(教程先于绑定存在,属体验设计);未登录/会话失效 → 401;
+- **零生产副作用(硬约束)**：不建 production_groups(不占 24h 窗口)、
+  不入 jobqueue、不触发云渲染、不写该用户租户任何生产状态;
+- **限频**：每账号每日 ≤3 次,超限 429 `rate_limited`;
+- 响应即时(客户端自行演出「剪辑中」节奏);demo 作品页走公网 GET 入口
+  (REQ-20261022-001),写操作仍被拒;
+
 ### 与既有接口的关系
 
 - C2S-6 capabilities 冻结时**兼容性新增**字段：`auth`（已实现的鉴权
@@ -811,6 +828,7 @@ import-session 幂等重跑保留）。
 
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
+| 2026-10-22 | 1.4.1(补录) | C2S-16 / §4A | 兼容性新增（REQ-20261022-002）：新手教程识别 `POST /api/production/v1/tutorial`（登录态、豁免三前置、零生产副作用、每账号每日≤3 次）；demo 租户作品页复用公网 GET 入口。CONTRACT_VERSION 常量随下次发版同步 |
 | 2026-10-21 | 1.3.2 | §5.2 / C2S-3 | 兼容性新增（REQ-20261021-004）：manifest 可选键 **`logs`**（本次随包上传的端侧日志文件名列表）+ eval 包文件清单新增前缀 `sessions/<场次>/logs/<name>-YYYYMMDD.log`（尾部 512KB 快照，同日重跑覆盖）。端侧已实现（push 自动携带）；服务端 HTTPS 白名单放行该前缀为配合项待认领（未放行前 complete 报 400 invalid_path，端侧把日志加入清单会失败——放行前端侧不因此重试），rsync 通道天然可用。CONTRACT_VERSION 常量随下次发版同步 1.3.2 | [REQ-20261021-004](../cut_kb/需求/REQ-20261021-004-录像目录二级嵌套支持与本地日志随包上传.md) |
 | 2026-10-21 | 1.4.0（细则补录） | §4A C2S-12 / `/me` | 微信绑定三前置（REQ-20261021-001 规则1，方案A）：C2S-12 新增专属错误码 **`403 binding_required`** 与受理绑定核验细则（受理事务内现查 pc-bindings 桥、pending 视同未绑定、通知开关≠解绑、已受理任务不因解绑中止、换绑窗口拒绝新申请）；`/me` 形状首次补录并新增可缺省字段 `entitlements`/`binding.state`（端侧容错展示不缓存，权威判断在 C2S-12 受理层）。冻结接口形状/编号未变，CONTRACT_VERSION 不变 | [REQ-20261021-001](../cut_kb/需求/REQ-20261021-001-权益与每日生产规则.md)、[方案A](../cut_kb/想法/IDEA-20261019-006-方案A-微信绑定强制.md) |
 | 2026-10-19 | 1.3.0 | C2S-6~9 / SRV-4 / §2.1 | 兼容性新增：受控 HTTPS 上传通道（`https://95188.pw/api/production/v1`，Bearer 租户 token，tenant 服务端解出、路径白名单、SHA-256 复核、分块断点续传、complete 自动 import/eval）；config 新增 `server.upload_url`/`upload_token`（非空即 HTTPS 通道，客户分发包不再携带 ssh 私钥/rsync）；rsync 通道保留内部机用，行为不变。接口形状对齐 REQ-20261019-003 拟议的 `/api/production/v1`，统一账号上线后仅替换鉴权层（REQ-20261019-005） |

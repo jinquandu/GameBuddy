@@ -28,6 +28,8 @@ from toolbox.config import DATA, ROOT, load_config
 
 QUEUE_FILE = DATA / ".folder_watch.json"
 VIDEO_EXTS = {".mp4", ".flv", ".ts", ".mkv", ".mov"}
+TUTORIAL_SESSION = "新手体验-demo"    # 新手教程沙盒会话名(REQ-20261022-002):
+                                      # 队列消费时拦截,不跑真识别链
 SCAN_DEPTH = 3        # 监控根下递归深度上限（REQ-20261021-004）：目标目录
                       # 最深=监控根/x/y/（二级场次，如 根/<游戏>/<场次>/），
                       # 再深不扫——防误扫用户整盘；只看根直下=旧行为
@@ -296,6 +298,13 @@ def process_pending(watch_dir, runner=run_pipeline_subprocess, limit=1):
         j = claim_next()
         if not j:
             break
+        # 教程会话拦截(REQ-20261022-002):不跑真识别链/真上传,直接标
+        # done——真实机制的可视化部分(扫描/队列/徽标)已经走完,处理本身
+        # 由服务端 C2S-16 短路(客户端演出节奏在 pet 侧)。
+        if j.get("session") == TUTORIAL_SESSION:
+            finish(j["key"], True, "新手教程会话(服务端短路,不跑识别链)")
+            results.append((j["session"], True, "tutorial"))
+            continue
         try:
             rc, log = runner(j["path"])
         except Exception as e:                 # noqa: BLE001 子进程异常按失败记
