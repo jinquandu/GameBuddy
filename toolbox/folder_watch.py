@@ -50,9 +50,44 @@ def _now():
 
 def _load():
     try:
-        return json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
+        state = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"jobs": {}}
+    _merge_dir_tasks(state)
+    return state
+
+
+def _merge_dir_tasks(state):
+    """目录任务聚合迁移(REQ-20261022-002):①同 path 多条(旧键=内容哈希)
+    合并为一条;②散装单文件任务(旧版按文件立任务)按父目录聚合为目录
+    任务——保留 enqueued_at 最早者(排队序不变),状态优先级
+    running>queued>done/failed。幂等;不影响 path 唯一的目录会话(如教程)。"""
+    jobs = state.get("jobs")
+    if not isinstance(jobs, dict):
+        return
+    groups = {}
+    for k, j in jobs.items():
+        pth = j.get("path", "")
+        grp = pth if Path(pth).is_dir() else str(Path(pth).parent)
+        groups.setdefault(grp, []).append((k, j))
+    prio = {"running": 0, "queued": 1, "done": 2, "failed": 2}
+    for grp, items in groups.items():
+        if len(items) < 2:
+            continue
+        items.sort(key=lambda kv: (prio.get(kv[1].get("state"), 3),
+                                   kv[1].get("enqueued_at", "")))
+        keep_k, keep_j = items[0]
+        # 教程会话(新手体验-demo)永远独立保留,不参与归并
+        if keep_j.get("session") == TUTORIAL_SESSION:
+            continue
+        # 散装组:保留键改为目录键(目录任务口径),session 取目录名
+        if not Path(keep_j.get("path", "")).is_dir() and len(items) > 1:
+            keep_j["path"] = grp
+            keep_j["session"] = Path(grp).name
+        for k, _ in items[1:]:
+            if jobs[k].get("session") == TUTORIAL_SESSION:
+                continue                   # 教程会话不吞
+            jobs.pop(k)
 
 
 def _save(state):
@@ -64,9 +99,13 @@ def _save(state):
 
 
 def job_key(p: Path):
-    """任务键。文件=自身 stat；目录=对内部视频清单逐项哈希——目录自身的
-    stat 在「改写内部文件」时不变化（NTFS 只在建删改名时动目录 mtime），
-    按目录 stat 做键会漏检内容变化（2026-10-19 回归实测）。"""
+    """任务键(REQ-20261022-002 优化:一个文件夹=一个任务)。
+
+    目录任务键 = 目录路径哈希——目录内容变化(新分片写入)只更新既有任务
+    的键后缀,**不再另立新任务**(旧行为按内部视频清单哈希,同目录会裂成
+    多条:mk4 实测裂成 12 条分片任务)。键后缀仍含清单指纹,供状态视图
+    显示「内容已变化」。散装文件 = 自身 stat。
+    """
     h = hashlib.sha1(str(p).encode("utf-8"))
     if p.is_dir():
         for v in _videos_in(p):
@@ -143,6 +182,25 @@ def scan(watch_dir, state=None):
             return
         if key in state["jobs"]:
             return                         # 去重：任何状态都不重复入队
+        # 目录任务聚合(REQ-20261022-002):一个文件夹=一个任务。同目录的
+        # 旧任务(旧键=内容清单哈希,内容变化会裂成多条)→ 沿用旧键/状态/
+        # 排位,只更新内容指纹说明;done/failed 的目录内容更新 → 重新排队
+        # (新素材该处理);queued/running 不动(已在等/在跑)。
+        target_dir = str(target)
+        stale = [k for k, j in state["jobs"].items()
+                 if j["path"] == target_dir and k != key]
+        if stale:
+            keep = stale[0]
+            for k in stale[1:]:
+                state["jobs"].pop(k)
+            old = state["jobs"][keep]
+            old["note"] = "内容已更新"
+            old["updated_at"] = _now()
+            if old["state"] in ("queued", "running"):
+                return                     # 已在等/在跑:不重复入队
+            old["state"] = "queued"        # done/failed+新内容 → 重新排队
+            old["attempts"] = 0
+            return
         state["jobs"][key] = {
             "key": key, "path": str(target),
             "session": target.stem if target.is_file() else target.name,
@@ -188,7 +246,9 @@ def scan(watch_dir, state=None):
         if entry.name.startswith("."):
             continue
         walk(entry, 0)                     # 根直下散装视频/一二级目录
-    if new:
+    # new>0 或发生目录任务聚合(note/键更新)都要落盘
+    if new or any(j.get("note") == "内容已更新"
+                  for j in state["jobs"].values()):
         _save(state)
     return new
 
@@ -330,6 +390,20 @@ def process_pending(watch_dir, runner=run_pipeline_subprocess, limit=1,
     return new, results
 
 
+def remove(key):
+    """用户删减任务(REQ-20261022-002):从队列移除该记录(不动磁盘文件)。
+    running 任务树杀(正在跑的识别链立即终止,与 pet 关窗同法)。"""
+    state = _load()
+    j = state["jobs"].get(key)
+    if not j:
+        return None
+    if j["state"] == "running":
+        kill_current()
+    state["jobs"].pop(key)
+    _save(state)
+    return j
+
+
 def summary():
     """状态视图：{queued,running,done,failed:[...最近失败…]}。"""
     st = _load()["jobs"]
@@ -339,6 +413,17 @@ def summary():
             out[j["state"]] += 1
         elif j["state"] == "failed":
             out["failed"].append(j["session"])
+    return out
+
+
+def jobs_view():
+    """任务列表视图(REQ-20261022-002 优化):[{key,session,state,at}] 按
+    入队序——供 UI 呈现每任务状态+删减。"""
+    st = _load()["jobs"]
+    out = [{"key": k, "session": j["session"], "state": j["state"],
+            "note": j.get("note", "")}
+           for k, j in sorted(st.items(),
+                              key=lambda kv: kv[1].get("enqueued_at", ""))]
     return out
 
 

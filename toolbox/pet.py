@@ -395,13 +395,18 @@ class PetWindow(tk.Tk):
                                     justify="left")
         self.prod_detail.pack(fill="x", pady=(6, 0))
 
-        b3 = self._card(home, "后台队列")
-        self.queue_lab = tk.Label(b3, text="…", bg=BRAND["card"], fg=C["fg"],
-                                  font=(FONT, 9), anchor="w",
-                                  wraplength=350, justify="left")
-        self.queue_lab.pack(side="left", fill="x", expand=True)
-        ttk.Button(b3, text="刷新", width=6,
+        b3 = self._card(home, "任务队列")
+        head3 = tk.Frame(b3, bg=BRAND["card"])
+        head3.pack(fill="x")
+        self.queue_lab = tk.Label(head3, text="…", bg=BRAND["card"],
+                                  fg=C["fg"], font=(FONT, 9), anchor="w")
+        self.queue_lab.pack(side="left")
+        ttk.Button(head3, text="刷新", width=6,
                    command=self._all_refresh).pack(side="right")
+        # 任务列表(REQ-20261022-002 优化):每任务一行=状态徽标+场次名+
+        # 删除钮;排序=入队顺序
+        self.queue_rows = tk.Frame(b3, bg=BRAND["card"])
+        self.queue_rows.pack(fill="x", pady=(4, 0))
 
         # ---- 我的作品：三选一说明 + 真实状态 + 作品页入口
         works = self._pages["works"]
@@ -677,6 +682,7 @@ class PetWindow(tk.Tk):
                 out["wdir"] = wdir
                 if wdir:
                     out["summary"] = fw.summary()
+                    out["jobs"] = fw.jobs_view()   # 任务列表(状态/序)
                     out["last_ts"] = fw.last_production_ts()
                     out["due"] = fw.production_due(boot=False)
                     out["added"] = fw.new_recordings_bytes(wdir)
@@ -693,9 +699,11 @@ class PetWindow(tk.Tk):
         q = prod.get("summary") or {}
         if q:
             self.queue_lab.config(
-                text=f"排队 {q.get('queued', 0)} · 处理中 {q.get('running', 0)}"
-                     f" · 完成 {q.get('done', 0)}"
-                     f" · 失败 {len(q.get('failed', []))}")
+                text=f"排队 {q.get('queued', 0)} · 处理中 "
+                     f"{q.get('running', 0)} · 完成 {q.get('done', 0)}"
+                     + (f" · 失败 {len(q.get('failed', []))}"
+                        if q.get("failed") else ""))
+        self._render_queue_rows(prod.get("jobs") or [])
         if prod.get("wdir"):
             self.works_lab.config(
                 text=self._works_text(prod, q))
@@ -749,6 +757,47 @@ class PetWindow(tk.Tk):
         else:
             base = "还没有作品。录像足够后（近 24 小时新增超过 2GB）会自动为你剪辑"
         return base + "\n每天最多剪出 3 条候选，点「打开作品页」去挑一条最好的"
+
+    STATE_TXT = {"queued": "排队中", "running": "处理中", "done": "已完成"}
+
+    def _render_queue_rows(self, jobs):
+        """任务列表(REQ-20261022-002):状态徽标+场次名+删除钮,入队序。
+        上限显示 8 行,余量以「…共 N 个」收尾;删除只移队列记录不动文件。"""
+        for w in self.queue_rows.winfo_children():
+            w.destroy()
+        if not jobs:
+            tk.Label(self.queue_rows, text="（空）", bg=BRAND["card"],
+                     fg=C["dim"], font=(FONT, 8)).pack(anchor="w")
+            return
+        for i, j in enumerate(jobs[:8], 1):
+            row = tk.Frame(self.queue_rows, bg=BRAND["card"])
+            row.pack(fill="x")
+            st = j["state"]
+            stc = {"running": BRAND["primary"], "done": C["good"],
+                   "failed": C["bad"]}.get(st, C["warn"])
+            tk.Label(row, text=f"{i}.", bg=BRAND["card"], fg=C["dim"],
+                     font=(FONT, 8), width=2).pack(side="left")
+            tk.Label(row, text=self.STATE_TXT.get(st, st), bg=BRAND["card"],
+                     fg=stc, font=(FONT, 8), width=5).pack(side="left")
+            name = j["session"]
+            tk.Label(row, text=name[:22] + ("…" if len(name) > 22 else ""),
+                     bg=BRAND["card"], fg=C["fg"], font=(FONT, 9),
+                     anchor="w").pack(side="left", fill="x", expand=True)
+            ttk.Button(row, text="删除", width=4,
+                       command=lambda k=j["key"]: self._queue_remove(k)
+                       ).pack(side="right")
+        if len(jobs) > 8:
+            tk.Label(self.queue_rows, text=f"…共 {len(jobs)} 个任务",
+                     bg=BRAND["card"], fg=C["dim"],
+                     font=(FONT, 8)).pack(anchor="w")
+
+    def _queue_remove(self, key):
+        """删减任务(REQ-20261022-002):只移队列记录,不动磁盘录像。"""
+        import toolbox.folder_watch as fw
+        j = fw.remove(key)
+        if j:
+            self._flash(f"已移除任务:{j['session'][:20]}", C["dim"])
+        self._prod_refresh()
 
     def _open_portal(self):
         from toolbox.config import load_config

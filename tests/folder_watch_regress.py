@@ -58,14 +58,18 @@ def main():
                   and any(j["session"] == "散装单文件" for j in st.values()),
                   "场次目录与散文件两类目标登记")
 
-            # 2) 去重 + 文件变化=新任务
+            # 2) 去重 + 目录任务聚合（REQ-20261022-002:一个文件夹=一个任务）
             check(fw.scan(watch) == 0, "重扫零新入队（任何状态不重复入队）")
             touch(s1 / "P1 一段.mp4", size=200, age=time.time() - 3700)
             n = fw.scan(watch)
             st = fw._load()["jobs"]
-            check(n == 1, "文件变化（size/mtime 变）= 新任务键")
-            check(len([j for j in st.values() if j["path"].endswith("场次A")]) == 2,
-                  "旧任务记录保留对账")
+            check(n == 0, "目录内容变化不另立新任务（沿用原任务）")
+            check(len([j for j in st.values()
+                       if j["path"].endswith("场次A")]) == 1,
+                  "一个文件夹=一个任务（不裂成多条）")
+            check(any("内容已更新" in j.get("note", "")
+                      for j in st.values() if j["path"].endswith("场次A")),
+                  "内容变化在原任务上标注「内容已更新」")
 
             # 3) claim/finish：成功、失败重试、上限
             jobs_before = len(fw._load()["jobs"])
