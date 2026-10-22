@@ -933,10 +933,12 @@ class PetWindow(tk.Tk):
 
         def run():
             try:
-                # ① 素材下载(断点续传)
-                tut.download_material(progress=lambda f: self.after(
-                    0, lambda f=f: self.prod_detail.config(
-                        text=f"体验素材下载 {int(f*100)}%")))
+                # ① 素材下载(断点续传;全程进度%+耗时)
+                t0 = time.time()
+                tut.download_material(progress=lambda f: self.after(0, lambda
+                    f=f: self.prod_detail.config(
+                        text=f"[1/4] 下载体验素材 {int(f*100)}%"
+                             f"（已用 {int(time.time()-t0)} 秒）")))
                 self.after(0, lambda: self._flash(self.TUT_STEPS[1],
                                                   C["accent"]))
                 # ② 落沙盒(监控目录/新手体验-demo,走真实扫描入队)
@@ -945,21 +947,31 @@ class PetWindow(tk.Tk):
                     self.after(0, lambda: self._flash(
                         "教程素材未就绪,请重试", C["warn"]))
                     return
-                # ③ 真实扫描入队(folder_watch 对教程会话消费时短路)
+                # ③ 真实扫描入队;消费只针对教程会话(only_session)——
+                #    用户真实场次即使已排队也不被拉起(2026-10-22 用户
+                #    反馈黑框一闪=教程把真实场次一起跑了解决)
                 import toolbox.folder_watch as fw
                 fw.scan(str(dst.parent))
                 self.after(0, lambda: self._flash(self.TUT_STEPS[2],
                                                   C["accent"]))
                 time.sleep(2)                  # 让用户看到「排队」一瞬
-                n_ok, _ = self._daily_pass(str(dst.parent))
+                self.after(0, lambda: self.prod_detail.config(
+                    text="[3/4] 自动扫描发现素材,进入处理队列"))
+                n_ok, _ = self._daily_pass(str(dst.parent),
+                                           only_session=tut.TUTORIAL_SESSION)
                 if not n_ok:
                     self.after(0, lambda: self._flash(
                         "教程素材未被队列消费,请重试", C["warn"]))
                     return
-                # ④ C2S-16(服务端豁免三前置,零生产副作用)
+                # ④ C2S-16(服务端豁免三前置,零生产副作用);演出「剪辑中」
+                #    倒计时(全程持续状态反馈,2026-10-22 用户反馈)
                 self.after(0, lambda: self._flash(self.TUT_STEPS[3],
                                                   C["accent"]))
-                time.sleep(70)                 # 演出「剪辑中」节奏(60-90s)
+                for left in range(70, 0, -10):
+                    self.after(0, lambda l=left: self.prod_detail.config(
+                        text=f"[4/4] 自动剪辑中…预计还需 {l} 秒"
+                             "（真实场景约 20 分钟）"))
+                    time.sleep(10)
                 try:
                     r = tut.call_tutorial_api()
                     works = (r.get("produce") or {}).get("works_url", "")
@@ -1018,12 +1030,14 @@ class PetWindow(tk.Tk):
         win.wait_visibility()
         win.grab_set()
 
-    def _daily_pass(self, wdir):
-        """跑完当前全部就绪任务（顺序，单日上限 100 保护）。"""
+    def _daily_pass(self, wdir, only_session=None):
+        """跑完当前全部就绪任务（顺序，单日上限 100 保护）。
+        only_session(REQ-20261022-002):教程流程只消费教程会话,用户真实
+        场次留在队列(防止教程把真实场次一起拉起跑——黑框+误跑链)。"""
         import toolbox.folder_watch as fw
         n_ok = n_fail = 0
         for _ in range(100):
-            new, results = fw.process_pending(wdir)
+            new, results = fw.process_pending(wdir, only_session=only_session)
             if not results:
                 break
             for session, ok, log in results:

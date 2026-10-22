@@ -62,14 +62,40 @@ def main():
             import os
             v = dst / "新手体验-demo.mp4"
             os.utime(v, (time.time() - 3600, time.time() - 3600))  # 拨旧=稳定
+            # 真实场次与教程会话并存(用户反馈场景:教程不拉起真实场次)
+            _mkvid = wdir / "真实场次A"
+            _mkvid.mkdir()
+            (_mkvid / "P1.mp4").write_bytes(b"v" * 2048)
+            os.utime(_mkvid / "P1.mp4",
+                     (time.time() - 3600, time.time() - 3600))
             n = fw.scan(wdir, state=fw._load())
-            check(n == 1, "真实扫描发现教程会话")
-            j = fw.claim_next()
+            check(n == 2, f"教程会话+真实场次双入队（实得 {n}）")
+            j = fw.claim_next(only_session=tut.TUTORIAL_SESSION)
             check(j["session"] == tut.TUTORIAL_SESSION, "领取=教程会话")
             fw.finish(j["key"], True, "新手教程会话(服务端短路)")
-            # 守卫:教程路径绝不写生产窗口
             check(fw.last_production_ts() == 0,
                   "守卫:教程不写 last_production_ts(不占 24h 窗口)")
+
+            # ---- only_session 隔离(2026-10-22 用户反馈:教程不拉起真实场次) ----
+            queued_before = fw.summary()["queued"]
+            n2, results2 = fw.process_pending(
+                wdir, runner=lambda pth: (_ for _ in ()).throw(
+                    AssertionError("教程消费不应起识别链子进程")),
+                only_session=tut.TUTORIAL_SESSION)
+            check(not results2 and fw.summary()["queued"] == queued_before,
+                  "only_session:教程已 done,真实场次留在队列不被消费")
+            n2, results2 = fw.process_pending(
+                wdir, runner=lambda pth: (_ for _ in ()).throw(
+                    AssertionError("教程消费不应起识别链子进程")),
+                only_session=tut.TUTORIAL_SESSION)
+            # 教程会话已 done;only_session 下不应消费真实场次
+            check(all(s != "真实场次A" for s, _, _ in results2)
+                  and fw.summary()["queued"] == queued_before,
+                  "only_session:教程消费不触碰真实场次(留在队列)")
+            # 不带过滤的正常消费仍能领到真实场次(真实链路不受影响)
+            j3 = fw.claim_next()
+            check(j3 is not None and j3["session"] == "真实场次A",
+                  "无过滤时真实场次正常消费")
 
             # ---- C2S-16 客户端三态(方法级 mock) ----
             import toolbox.account as acct

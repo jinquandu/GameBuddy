@@ -24,6 +24,11 @@ import time
 from pathlib import Path
 
 from toolbox import proc
+
+
+def _proc_mod():
+    """模块别名(局部 proc 变量遮蔽模块名时的取用通道)。"""
+    return proc
 from toolbox.config import DATA, ROOT, load_config
 
 QUEUE_FILE = DATA / ".folder_watch.json"
@@ -213,11 +218,15 @@ def expire_leases(state=None):
     return changed
 
 
-def claim_next(state=None):
-    """领取一个 queued 任务 → running（记租约）。无任务返回 None。"""
+def claim_next(state=None, only_session=None):
+    """领取一个 queued 任务 → running（记租约）。无任务返回 None。
+    only_session(REQ-20261022-002):只领指定会话(教程流程用,防止把用户
+    真实场次一起拉起来跑),不匹配的任务原样留在队列。"""
     state = state if state is not None else _load()
     for j in sorted(state["jobs"].values(), key=lambda x: x["enqueued_at"]):
         if j["state"] == "queued":
+            if only_session and j["session"] != only_session:
+                continue
             j["state"] = "running"
             j["attempts"] += 1
             j["taken_ts"] = time.time()
@@ -277,9 +286,12 @@ def run_pipeline_subprocess(target_path):
         args = [sys.executable, "-X", "utf8", "-m", "toolbox",
                 "pipeline", target_path, "--run-eval"]
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    # 注意:局部变量 proc 遮蔽模块名——NO_WINDOW 取模块别名(2026-10-22
+    # pet_e2e 实测 UnboundLocalError 教训,勿把 creationflags 写在赋值前)
     proc = subprocess.Popen(args, cwd=str(ROOT), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, encoding="utf-8", errors="replace")
+                            text=True, encoding="utf-8", errors="replace",
+                            creationflags=_proc_mod().NO_WINDOW)
     _CURRENT = proc
     try:
         out, _ = proc.communicate()
@@ -288,14 +300,17 @@ def run_pipeline_subprocess(target_path):
     return proc.returncode, (out or "")[-2000:]
 
 
-def process_pending(watch_dir, runner=run_pipeline_subprocess, limit=1):
+def process_pending(watch_dir, runner=run_pipeline_subprocess, limit=1,
+                    only_session=None):
     """一个调度节拍：回收租约 → 扫描入队 → 顺序跑 limit 个任务。
-    返回 (new_enqueued, [(session, ok, note), ...])。"""
+    返回 (new_enqueued, [(session, ok, note), ...])。
+    only_session(REQ-20261022-002):只消费指定会话(教程流程),其余任务
+    留在队列不受影响。"""
     expire_leases()
     new = scan(watch_dir)
     results = []
     for _ in range(limit):
-        j = claim_next()
+        j = claim_next(only_session=only_session)
         if not j:
             break
         # 教程会话拦截(REQ-20261022-002):不跑真识别链/真上传,直接标
