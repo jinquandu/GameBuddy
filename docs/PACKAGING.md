@@ -82,6 +82,7 @@ ssh ecs "cd .../clients && sha256sum <名>-uploading.zip && \
 
 | 包 | SHA256(前16) | 内容 |
 | --- | --- | --- |
+| **`GameBuddy-v0.1.zip`(对外正式名,=r5)** | `2147251b95be2a75` | 同 r5;对外分发用此名 |
 | `dashijie-pet-20261022-r5.zip` | `2147251b95be2a75` | =r4+新手教程全功能(入口/沙盒/队列拦截/守卫/C2S-16+C2S-17 微信推送接线)+队列任务化(目录级任务/任务列表/删减)+契约 1.4.1/1.4.2;**当前推荐验证包** |
 | `dashijie-pet-20261021-r4.zip` | `be053752136ec207` | =r3+REQ-005 成片自动化对接(produce 轮询/works_url/双挂点)+服务端 produce 状态机与 nginx 已配齐(正向全链验收过) |
 | `dashijie-pet-20261021-r3.zip` | `759494cd848fbdcb` | =r2+UI 文案客户化(去契约编号/行话,用户反馈)+_render_dir 内存值优先修复 |
@@ -89,8 +90,9 @@ ssh ecs "cd .../clients && sha256sum <名>-uploading.zip && \
 | `dashijie-pet-20261021.zip`(r1) | `9e76c7a63927447c` | =r2 减 REQ-004 两件(嵌套扫描/日志随包) |
 
 > r1~r5 均含:014 登录错误修复、002 run-eval 默认、001 规则 1(绑定)。
-> **r5 是当前推荐验证包**;官网正式位仍是 `DashijiePet-core-20261020.zip`
-> (p 包,4b2bf1b6…),等用户验收 r5 后切换。
+> **r5 已以正式名 `GameBuddy-v0.1.zip` 双发(同 SHA256 `2147251b…`),
+> 即当前对外下载位**;旧官网位 `DashijiePet-core-20261020.zip`(p 包)
+> 并存,待 r5 验收期满后下架。
 
 ## 6. 已知坑速查(细节见 memory)
 
