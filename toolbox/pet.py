@@ -1104,8 +1104,15 @@ class PetWindow(tk.Tk):
         t0 = time.time()
         self._flash("开始检测这台电脑…", C["accent"])
 
+        def _ui(fn):
+            """后台线程 → 主线程;窗口已关(TclError/RuntimeError)时静默放弃。"""
+            try:
+                self.after(0, fn)
+            except (tk.TclError, RuntimeError):
+                pass
+
         def progress(frac, text):
-            self.after(0, lambda t=text, f=frac: self.env_detail.config(
+            _ui(lambda t=text, f=frac: self.env_detail.config(
                 text=f"{t}（{int(max(0.0, min(1.0, f)) * 100)}%）",
                 fg=C["accent"]))
 
@@ -1116,7 +1123,7 @@ class PetWindow(tk.Tk):
             except Exception as e:              # noqa: BLE001 检测失败不杀窗
                 LOG.warning("环境检测异常:%s", e)
                 res = None
-            self.after(0, lambda r=res: self._env_done(r, t0, manual))
+            _ui(lambda r=res: self._env_done(r, t0, manual))
         threading.Thread(target=run, daemon=True, name="envcheck").start()
 
     def _env_done(self, result, t0, manual):
