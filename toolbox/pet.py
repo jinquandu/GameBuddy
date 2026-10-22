@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 import threading
 import time
 import tkinter as tk
@@ -800,9 +801,19 @@ class PetWindow(tk.Tk):
         self._prod_refresh()
 
     def _open_portal(self):
+        """打开作品页:优先 account.portal_url;未配置时从 server.upload_url
+        origin 推导 demo 作品页(URL 编码,与服务端 produce.works_url 同形;
+        REQ-20261022-001 公网已放行)。两者皆无(内部机)才提示联系大师姐。"""
         from toolbox.config import load_config
-        url = ((load_config().get("account") or {}).get("portal_url")
-               or "").strip()
+        from toolbox.uploader import works_full_url
+        cfg = load_config()
+        url = ((cfg.get("account") or {}).get("portal_url") or "").strip()
+        if not url:
+            origin = ((cfg.get("server") or {}).get("upload_url")
+                      or "").strip()
+            url = works_full_url(
+                origin, "/eval/demo/preview/"
+                + urllib.parse.quote("新手体验-demo"))
         if not url:
             self._flash("作品页还没开通，请联系大师姐", C["warn"])
             return
