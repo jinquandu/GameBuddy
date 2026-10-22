@@ -34,7 +34,9 @@ from toolbox.config import DATA, ROOT, load_config
 QUEUE_FILE = DATA / ".folder_watch.json"
 VIDEO_EXTS = {".mp4", ".flv", ".ts", ".mkv", ".mov"}
 TUTORIAL_SESSION = "新手体验-demo"    # 新手教程沙盒会话名(REQ-20261022-002):
-                                      # 队列消费时拦截,不跑真识别链
+                                      # 队列消费时拦截,不跑真识别链;
+                                      # done 后仅保留 1 天(次日自动隐藏清理)
+TUTORIAL_KEEP_S = 86400               # 教程任务完成后保留时长(24h)
 SCAN_DEPTH = 3        # 监控根下递归深度上限（REQ-20261021-004）：目标目录
                       # 最深=监控根/x/y/（二级场次，如 根/<游戏>/<场次>/），
                       # 再深不扫——防误扫用户整盘；只看根直下=旧行为
@@ -378,6 +380,13 @@ def process_pending(watch_dir, runner=run_pipeline_subprocess, limit=1,
         # 由服务端 C2S-16 短路(客户端演出节奏在 pet 侧)。
         if j.get("session") == TUTORIAL_SESSION:
             finish(j["key"], True, "新手教程会话(服务端短路,不跑识别链)")
+            # 教程完成后仅保留 1 天(REQ-20261022-002 优化):记完成时刻,
+            # jobs_view/jobs 次日自动隐藏并清理沙盒
+            st2 = _load()
+            j2 = st2["jobs"].get(j["key"])
+            if j2:
+                j2["done_at"] = time.time()
+                _save(st2)
             results.append((j["session"], True, "tutorial"))
             continue
         try:
@@ -404,11 +413,22 @@ def remove(key):
     return j
 
 
+def _tutorial_expired(j):
+    """教程任务 done 后超过保留期(TUTORIAL_KEEP_S=24h)→ 视为过期。"""
+    if j.get("session") != TUTORIAL_SESSION or j.get("state") != "done":
+        return False
+    done_at = j.get("done_at")
+    return bool(done_at) and time.time() - done_at > TUTORIAL_KEEP_S
+
+
 def summary():
-    """状态视图：{queued,running,done,failed:[...最近失败…]}。"""
+    """状态视图：{queued,running,done,failed:[...最近失败…]}。
+    过期教程任务(完成超 24h)不计入。"""
     st = _load()["jobs"]
     out = {"queued": 0, "running": 0, "done": 0, "failed": []}
     for j in st.values():
+        if _tutorial_expired(j):
+            continue                       # 次日不再显示
         if j["state"] in ("queued", "running", "done"):
             out[j["state"]] += 1
         elif j["state"] == "failed":
@@ -417,14 +437,35 @@ def summary():
 
 
 def jobs_view():
-    """任务列表视图(REQ-20261022-002 优化):[{key,session,state,at}] 按
-    入队序——供 UI 呈现每任务状态+删减。"""
+    """任务列表视图(REQ-20261022-002 优化):[{key,session,state,note}] 按
+    入队序——供 UI 呈现每任务状态+删减。过期教程任务(完成超 24h)隐藏
+    并就地清理(沙盒+记录)。"""
     st = _load()["jobs"]
-    out = [{"key": k, "session": j["session"], "state": j["state"],
-            "note": j.get("note", "")}
-           for k, j in sorted(st.items(),
-                              key=lambda kv: kv[1].get("enqueued_at", ""))]
+    out = []
+    for k, j in sorted(st.items(), key=lambda kv: kv[1].get("enqueued_at", "")):
+        if _tutorial_expired(j):
+            _cleanup_tutorial_task(k, j)
+            continue
+        out.append({"key": k, "session": j["session"], "state": j["state"],
+                    "note": j.get("note", "")})
     return out
+
+
+def _cleanup_tutorial_task(key, j):
+    """过期教程任务的就地清理:队列记录+沙盒目录(素材+完成标记)。"""
+    from toolbox import tutorial as tut
+    try:
+        sd = j.get("path")
+        if sd and Path(sd).exists():
+            shutil.rmtree(sd, ignore_errors=True)
+        shutil.rmtree(tut.TUTORIAL_DIR, ignore_errors=True)
+        state = _load()
+        state["jobs"].pop(key, None)
+        _save(state)
+        LOG_TXT = "教程任务已过期清理"
+        print(LOG_TXT)
+    except Exception:
+        pass
 
 
 # ---------------- 后台日任务标记（REQ-20261019-013：一天恰好一轮） ----------------

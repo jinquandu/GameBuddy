@@ -145,6 +145,19 @@ def main():
             # ---- 清理/重放 ----
             tut.mark_done()
             check(tut.is_done(), "完成标记")
+            # done 后仅保留 1 天:jobs_view/summary 次日隐藏+就地清理
+            st = fw._load()
+            for jj in st["jobs"].values():
+                if jj["session"] == tut.TUTORIAL_SESSION:
+                    jj["done_at"] = time.time() - fw.TUTORIAL_KEEP_S - 10
+                    jj["state"] = "done"
+            fw._save(st)
+            check(all(j["session"] != tut.TUTORIAL_SESSION
+                      for j in fw.jobs_view()),
+                  "过期教程任务从列表隐藏")
+            check(fw.summary()["done"] == 0, "过期教程不计入 summary")
+            check(not (dst / "新手体验-demo").exists(),
+                  "过期清理:沙盒目录已删")
             tut.reset(watch_dir=str(wdir))
             check(not tut.is_done() and not (dst / "新手体验-demo.mp4").exists()
                   and not tut.material_path().exists()

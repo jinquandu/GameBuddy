@@ -312,7 +312,15 @@ class PetWindow(tk.Tk):
         self._daily_start()
         # 点 X 必须走 _on_close：绕过会跳过杀日任务子进程/存历史/退托盘
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(15_000, self._queue_tick)   # 队列实时性(REQ-20261022-002
+                                               # 优化:15s 自动刷新任务列表)
         self.after(2500, self._dev_snapshot)
+
+    def _queue_tick(self):
+        """队列实时刷新节拍(15s):新入队/状态变化自动上屏(用户反馈——
+        加入新任务后列表滞后)。轻量:只读队列视图+渲染,不碰网络。"""
+        self._prod_refresh()
+        self.after(15_000, self._queue_tick)
 
     # ---------- 布局（左导航 + 三页卡片；素朴紧凑，配色=评审稿语言）
 
