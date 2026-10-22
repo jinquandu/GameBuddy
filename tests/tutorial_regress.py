@@ -138,6 +138,14 @@ def main():
                 except Exception as e:
                     raised = type(e).__name__
                 check(raised == "TNA", "旧服务端 404 → TutorialNotAvailable(降级)")
+                # C2S-17 客户端(REQ-20261022-003):notified true/false 透传
+                up.ProductionUploader._request = mk(200, {"notified": True})
+                r = tut.call_tutorial_notify("http://mock/api/production/v1")
+                check(r.get("notified") is True, "C2S-17 notified=true 解析")
+                up.ProductionUploader._request = mk(200, {"notified": False})
+                r = tut.call_tutorial_notify("http://mock/api/production/v1")
+                check(r.get("notified") is False,
+                      "C2S-17 notified=false(未绑定/降级)静默语义")
             finally:
                 up.ProductionUploader._request = orig_req
                 acct.require_login = real_login

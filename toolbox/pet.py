@@ -1046,8 +1046,19 @@ class PetWindow(tk.Tk):
                 except Exception as e:          # noqa: BLE001 旧后端/超限降级
                     LOG.warning("教程 C2S-16 降级:%s", e)
                     works = ""
+                # ④b C2S-17 微信推送(REQ-20261022-003):教程完成后企微
+                #    收「体验成片已就绪」+作品页链接;notified=false(未绑定/
+                #    未配置/不可用)静默——结束卡已兜底引导
+                notified = False
+                try:
+                    nr = tut.call_tutorial_notify()
+                    notified = bool((nr or {}).get("notified"))
+                except Exception as e:          # noqa: BLE001 推送失败不断流程
+                    LOG.warning("教程 C2S-17 降级:%s", e)
                 # ⑤ 收口:出片态+结束卡
                 tut.mark_done()
+                push_note = ("\n成片链接也发到你的微信了,注意查收。"
+                             if notified else "")
                 self.after(0, lambda: (self._flash(self.TUT_STEPS[4],
                                                    C["good"], sticky=True),
                                        self._tray_tip("教程完成"),
@@ -1081,7 +1092,7 @@ class PetWindow(tk.Tk):
                  font=(FONT, 13, "bold")).pack(anchor="w")
         tk.Label(f, text="刚才的一切——扫描、剪辑、出 3 条候选——"
                          "以后每天都会自动发生。\n"
-                         "你只需要保持录像文件夹有新录像。",
+                         "你只需要保持录像文件夹有新录像。" + push_note,
                  bg=BRAND["page"], fg=C["fg"], font=(FONT, 10),
                  justify="left", wraplength=380).pack(anchor="w", pady=(8, 10))
         row = ttk.Frame(f)

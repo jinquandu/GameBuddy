@@ -132,6 +132,24 @@ def plant_sandbox(watch_dir=None):
     return dst
 
 
+def call_tutorial_notify(api_production_url=None):
+    """C2S-17(契约 1.4.2,REQ-20261022-003):教程完成微信推送触发。
+    返回 {"notified": true|false}——false=未绑定微信/通知服务未配置或
+    不可用(客户端静默,结束卡兜底引导);仅登录,共用教程每日配额。"""
+    from toolbox.account import require_login
+    from toolbox import device_identity as di
+    from toolbox import uploader as up
+    cfg = (load_config().get("server") or {})
+    base = api_production_url or cfg.get("upload_url") \
+        or "https://95188.pw/api/production/v1"
+    s = require_login()
+    b = s["bearer"]
+    client = up.ProductionUploader(
+        base, token=b,
+        signer=lambda m, w, d: di.sign_request(m, w, d, b))
+    return client._request("POST", "/tutorial/notify", body={})
+
+
 def call_tutorial_api(api_production_url=None):
     """C2S-16(契约 1.4.1):登录签名请求教程识别豁免。返回响应 dict;
     429=今日超限;服务端未上线(404)= TutorialNotAvailable。"""
