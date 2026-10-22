@@ -19,7 +19,6 @@ import json
 import os
 import re
 import sys
-import urllib.parse
 import threading
 import time
 import tkinter as tk
@@ -57,6 +56,7 @@ BRAND = {"page": "#F2F1F6", "card": "#FFFFFF", "side": "#FFFFFF",
 FONT = "Microsoft YaHei UI"
 W = 660                        # 主窗宽（左导航 136 + 内容区）
 HIST = DATA / "pet" / "history.json"
+LAST_WORKS = DATA / "pet" / "last_works.json"
 NAV = (("home", "工作台"), ("works", "我的作品"), ("settings", "账号设置"))
 
 
@@ -299,14 +299,18 @@ class PetWindow(tk.Tk):
         self._status_text = ""
         self._status_sticky = False
         self._page = "home"
-        self.tutorial_busy = False     # 新手教程流程进行中(REQ-20261022-002)
         self._pre = {}          # prerequisites() 最近快照（主线程渲染用）
         self._prod = {}         # 生产状态快照（summary/窗口/新增字节）
+        self._sess = {}         # 当前登录会话快照
+        self._env = {}          # 环境检测结果快照(REQ-20261022-005)
+        self._env_busy = False  # 检测线程进行中(防重入)
+        self._env_auto_user = None   # 本会话已自动检测过的账号(防重复跑)
 
         self._build()
         self.geometry(f"{W}x600")
         self._place_bottom_right()
         self.bind("<Unmap>", self._on_unmap)   # 最小化 → 托盘
+        self._legacy_cleanup()
         self._acct_refresh()
         self._prod_refresh()
         self._daily_start()
@@ -321,6 +325,18 @@ class PetWindow(tk.Tk):
         加入新任务后列表滞后)。轻量:只读队列视图+渲染,不碰网络。"""
         self._prod_refresh()
         self.after(15_000, self._queue_tick)
+
+    def _legacy_cleanup(self):
+        """升级清理(REQ-20261022-005):旧版新手教程的素材缓存/沙盒/队列
+        记录一并移除。缓存已被校验过的 demo 素材先迁给环境检测复用,省一次
+        40MB 下载。全程尽力而为,失败不影响启动。"""
+        try:
+            from toolbox import envcheck
+            envcheck.adopt_legacy_material()
+            import toolbox.folder_watch as fw
+            fw._purge_legacy_tutorial()
+        except Exception as e:                  # noqa: BLE001 清理失败不拦启动
+            LOG.info("旧版教程遗留清理跳过:%s", e)
 
     # ---------- 布局（左导航 + 三页卡片；素朴紧凑，配色=评审稿语言）
 
@@ -389,10 +405,6 @@ class PetWindow(tk.Tk):
         b2 = self._card(home, "今日生产")
         head2 = tk.Frame(b2, bg=BRAND["card"])
         head2.pack(fill="x")
-        # 新手教程入口(REQ-20261022-002):登录后可见;完成后文字变化
-        self.tutorial_btn = ttk.Button(head2, text="新手教程", width=9,
-                                       command=self._tutorial_start)
-        self.tutorial_btn.pack(side="left", padx=(0, 6))
         self.prod_badge = tk.Label(head2, text="…", bg=BRAND["lav"],
                                    fg=BRAND["primary"], font=(FONT, 9),
                                    padx=8, pady=2)
@@ -445,15 +457,29 @@ class PetWindow(tk.Tk):
         pre_row = tk.Frame(s2, bg=BRAND["card"])
         pre_row.pack(fill="x")
         self.pre_labs = {}
+        # 条件徽标与「登录/权益/微信」并列:第 4 项=环境检测
+        # (REQ-20261022-005,替换原新手教程;登录后自动跑一次)
         for key, txt in (("login", "登录"), ("member", "权益"),
-                         ("bind", "微信")):
+                         ("bind", "微信"), ("env", "环境")):
             lab = tk.Label(pre_row, text=txt, bg=BRAND["card"], fg=C["dim"],
                            font=(FONT, 9))
             lab.pack(side="left", padx=(0, 12))
             self.pre_labs[key] = lab
-        self.bind_btn = ttk.Button(pre_row, text="去绑定", width=7,
+            if key == "env":
+                lab.configure(cursor="hand2")
+                lab.bind("<Button-1>", lambda e: self._env_click())
+        btn_row = tk.Frame(pre_row, bg=BRAND["card"])
+        btn_row.pack(side="right")
+        self.bind_btn = ttk.Button(btn_row, text="去绑定", width=7,
                                    command=self._bind_click)
         self.bind_btn.pack(side="right")
+        self.env_btn = ttk.Button(btn_row, text="检测", width=7,
+                                  command=self._env_click)
+        self.env_btn.pack(side="right", padx=(0, 6))
+        self.env_detail = tk.Label(s2, text="", bg=BRAND["card"], fg=C["dim"],
+                                   font=(FONT, 9), anchor="w",
+                                   wraplength=440, justify="left")
+        self.env_detail.pack(fill="x", pady=(6, 0))
 
         s3 = self._card(st, "微信与通知")
         self.set_bind_lab = tk.Label(s3, text="微信：未知", bg=BRAND["card"],
@@ -558,6 +584,7 @@ class PetWindow(tk.Tk):
             sess = AccountClient(api, prod).session_summary()
         except Exception:                      # noqa: BLE001 状态永不杀窗
             sess = {}
+        self._sess = sess or {}
         if sess:
             self.set_acct_lab.config(
                 text=f"{sess.get('user_id', '?')}（{sess.get('phone', '')}）",
@@ -569,8 +596,9 @@ class PetWindow(tk.Tk):
             self.set_acct_lab.config(text="未登录", fg=C["dim"])
             self.acct_btn.config(text="登录")
             self.side_acct.config(text="未登录", fg=C["dim"])
-        # 教程入口:仅登录后可见(REQ-20261022-002:教程仅要求登录)
-        self.tutorial_btn.config(state="normal" if sess else "disabled")
+        self._env_refresh()
+        if sess:
+            self._env_auto()
         self._render_dir()
         self._prereq_refresh()
 
@@ -607,6 +635,7 @@ class PetWindow(tk.Tk):
             glyph, color = mark[val]
             name = {"login": "登录", "member": "权益", "bind": "微信"}[key]
             self.pre_labs[key].config(text=f"{name}{glyph}", fg=C[color])
+        self._render_env()
         if binding == "none":                  # 仅明确未绑定才给入口
             self.bind_btn.pack(side="right")
         else:
@@ -706,16 +735,13 @@ class PetWindow(tk.Tk):
             self._prod = prod
         prod, pre = self._prod, self._pre
         q = prod.get("summary") or {}
-        if q:
-            self.queue_lab.config(
-                text=f"排队 {q.get('queued', 0)} · 处理中 "
-                     f"{q.get('running', 0)} · 完成 {q.get('done', 0)}"
-                     + (f" · 失败 {len(q.get('failed', []))}"
-                        if q.get("failed") else ""))
+        self.queue_lab.config(
+            text=(f"排队 {q.get('queued', 0)} · 处理中 "
+                  f"{q.get('running', 0)} · 完成 {q.get('done', 0)}"
+                  + (f" · 失败 {len(q.get('failed', []))}"
+                     if q.get("failed") else "")) if q else "还没有任务")
         self._render_queue_rows(prod.get("jobs") or [])
-        if prod.get("wdir"):
-            self.works_lab.config(
-                text=self._works_text(prod, q))
+        self.works_lab.config(text=self._works_text(prod, q))
         # 工作台徽标链：目录 → 登录 → 绑定 → 权益 → 生产窗口
         api, _ = self._acct_cfg()
         badge, detail, act, cmd = "…", "", None, None
@@ -760,6 +786,9 @@ class PetWindow(tk.Tk):
     def _works_text(self, prod, q):
         """我的作品页状态行（真实数据；三选一在作品页完成）。文案面向
         客户——不带契约编号/内部术语（用户反馈 2026-10-21）。"""
+        if not prod.get("wdir"):
+            return ("先在工作台选好录像文件夹，之后每天会自动为你剪出候选。\n"
+                    "每条候选都可以在这里打开作品页查看")
         if prod.get("last_ts"):
             t = time.strftime("%m-%d %H:%M", time.localtime(prod["last_ts"]))
             base = f"最近一次出片：{t}（已出 {q.get('done', 0)} 场）"
@@ -809,23 +838,41 @@ class PetWindow(tk.Tk):
         self._prod_refresh()
 
     def _open_portal(self):
-        """打开作品页:优先 account.portal_url;未配置时从 server.upload_url
-        origin 推导 demo 作品页(URL 编码,与服务端 produce.works_url 同形;
-        REQ-20261022-001 公网已放行)。两者皆无(内部机)才提示联系大师姐。"""
-        from toolbox.config import load_config
+        """打开作品页:account.portal_url（显式配置）→ 最近一场真实成片的
+        works_url（REQ-20261021-005 轮询期间落盘）→ 提示尚无作品。
+        2026-10-22 用户要求:不再有 demo 视频发给用户看的环节。"""
         from toolbox.uploader import works_full_url
         cfg = load_config()
         url = ((cfg.get("account") or {}).get("portal_url") or "").strip()
         if not url:
+            last = self._load_last_works()
             origin = ((cfg.get("server") or {}).get("upload_url")
                       or "").strip()
-            url = works_full_url(
-                origin, "/eval/demo/preview/"
-                + urllib.parse.quote("新手体验-demo"))
+            url = works_full_url(origin, last.get("works_url") or "")
         if not url:
-            self._flash("作品页还没开通，请联系大师姐", C["warn"])
+            self._flash("还没有作品可看：剪辑完成后会自动生成作品页", C["warn"])
             return
         webbrowser.open(url)
+
+    def _load_last_works(self):
+        try:
+            d = json.loads(LAST_WORKS.read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_last_works(self, session, works_url):
+        """记住最近一场成片的作品页地址(打开作品页入口用)。"""
+        if not works_url:
+            return
+        try:
+            LAST_WORKS.parent.mkdir(parents=True, exist_ok=True)
+            LAST_WORKS.write_text(json.dumps(
+                {"session": session, "works_url": works_url,
+                 "ts": time.time()}, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+        except OSError as e:
+            LOG.info("作品页地址落盘失败:%s", e)
 
     def _render_dir(self):
         # 内存值优先（用户刚选择=最新意图），config 兜底（启动时从配置来）
@@ -966,157 +1013,182 @@ class PetWindow(tk.Tk):
             return "微信还没绑定（在「账号设置」里绑定后，今天就帮你补上）"
         return ""
 
-    # ---------- 新手教程(REQ-20261022-002:~10 分钟全流程体验)
+    # ---------- 环境检测(REQ-20261022-005:替换新手教程)
     #
-    # 真实机制可视化+服务端短路:素材下载→落沙盒→真实扫描入队→队列消费
-    # (folder_watch 对教程会话拦截,不跑识别链)→C2S-16 服务端豁免→
-    # 客户端演出「剪辑中」节奏→结束卡。守卫:不写 last_production_ts、
-    # 不触发真实上传/生产;沙盒在结束卡后清理,可重放。
+    # 登录后自动跑一次(每账号 7 天内不重复自动跑,手动「重新检测」随时可跑):
+    # 系统/磁盘/视频工具实测 + 用 demo 素材真实解码与画面识别,结论落在
+    # 「开始剪辑的条件」第四项,与登录/权益/微信并列。不发布任何作品、
+    # 不打开作品页、不碰云端生产状态——只是回答「这台电脑能不能剪」。
+    ENV_AUTO_DAYS = 7
 
-    TUT_STEPS = ("正在准备体验素材…", "素材就绪,放进录像文件夹…",
-                 "自动扫描发现素材…", "自动剪辑中(体验加速)…",
-                 "出片完成!打开作品页看看")
+    def _env_refresh(self):
+        from toolbox import envcheck
+        self._env = envcheck.last_result()
+        self._render_env()
 
-    def _tutorial_start(self):
-        """入口:登录门控(教程仅要求登录)→后台跑教程流程,UI 逐步反馈。"""
-        api, _ = self._acct_cfg()
-        if not api:
-            self._flash("教程需要账号服务,当前为内部机配置", C["warn"])
+    def _render_env(self):
+        """渲染环境徽标 + 一行摘要;未登录时显示「登录后自动检测」。"""
+        from toolbox import envcheck
+        logged = bool(self._sess)
+        state = envcheck.result_state(self._env) if logged else "off"
+        glyph, color = {"off": ("·", C["dim"]), "pass": ("✓", C["good"]),
+                        "warn": ("!", C["warn"]), "fail": ("✗", C["bad"])
+                        }[state]
+        self.pre_labs["env"].config(text=f"环境{glyph}", fg=color)
+        if not logged:
+            self.env_detail.config(
+                text="登录后自动检测这台电脑能不能稳定剪片（约 1-2 分钟）",
+                fg=C["dim"])
+        else:
+            self.env_detail.config(text=envcheck.summary_line(self._env),
+                                   fg=C["dim"])
+        self.env_btn.config(state="normal" if logged and not self._env_busy
+                            else "disabled")
+
+    def _env_auto(self):
+        """登录后自动检测:同账号 7 天内的结果直接复用(不反复跑 OCR 基准),
+        换账号或过期才重跑。正在剪片时让路(避免抢 CPU 拖慢识别),120 秒
+        后再试。"""
+        from toolbox import envcheck
+        uid = str((self._sess or {}).get("user_id") or "")
+        if not uid or self._env_busy:
             return
-        if self.tutorial_busy:
+        r = self._env
+        fresh = (str(r.get("user_id") or "") == uid
+                 and time.time() - float(r.get("ts") or 0)
+                 < self.ENV_AUTO_DAYS * 86400)
+        if fresh or self._env_auto_user == uid:
             return
-        self.tutorial_busy = True
-        self.tutorial_btn.config(state="disabled")
-        from toolbox import tutorial as tut
+        if (self._prod.get("summary") or {}).get("running"):
+            self.after(120_000, self._env_auto)
+            return
+        self._env_auto_user = uid
+        self._env_run(manual=False)
+
+    def _env_click(self):
+        if not self._sess:
+            self._flash("登录后会自动检测环境", C["warn"])
+            return
+        if self._env_busy:
+            return
+        if self._env:
+            self._env_dialog()          # 有结果:先给详情,详情里可重新检测
+        else:
+            self._env_run(manual=True)
+
+    def _env_run(self, manual=True):
+        """后台跑完整检测;进度写「开始剪辑的条件」摘要行,结束刷新徽标。"""
+        if self._env_busy:
+            return
+        self._env_busy = True
+        self.env_btn.config(state="disabled")
+        from toolbox import envcheck
         wdir = self.watch_dir or (load_config().get("folder_watch")
                                   or {}).get("watch_dir")
-        if tut.is_done():
-            tut.reset(watch_dir=wdir)          # 重放:清上轮沙盒
-        if not wdir:
-            self._flash("先在工作台选择录像文件夹,再开始教程", C["warn"])
-            self.tutorial_busy = False
-            self.tutorial_btn.config(state="normal")
-            return
-        self._flash(self.TUT_STEPS[0], C["accent"])
+        uid = str((self._sess or {}).get("user_id") or "")
+        t0 = time.time()
+        self._flash("开始检测这台电脑…", C["accent"])
+
+        def progress(frac, text):
+            self.after(0, lambda t=text, f=frac: self.env_detail.config(
+                text=f"{t}（{int(max(0.0, min(1.0, f)) * 100)}%）",
+                fg=C["accent"]))
 
         def run():
             try:
-                # ① 素材下载(断点续传;全程进度%+耗时)
-                t0 = time.time()
-                tut.download_material(progress=lambda f: self.after(0, lambda
-                    f=f: self.prod_detail.config(
-                        text=f"[1/4] 下载体验素材 {int(f*100)}%"
-                             f"（已用 {int(time.time()-t0)} 秒）")))
-                self.after(0, lambda: self._flash(self.TUT_STEPS[1],
-                                                  C["accent"]))
-                # ② 落沙盒(监控目录/新手体验-demo,走真实扫描入队)
-                dst = tut.plant_sandbox(watch_dir=wdir)
-                if dst is None:
-                    self.after(0, lambda: self._flash(
-                        "教程素材未就绪,请重试", C["warn"]))
-                    return
-                # ③ 真实扫描入队;消费只针对教程会话(only_session)——
-                #    用户真实场次即使已排队也不被拉起(2026-10-22 用户
-                #    反馈黑框一闪=教程把真实场次一起跑了解决)
-                import toolbox.folder_watch as fw
-                fw.scan(str(dst.parent))
-                self.after(0, lambda: self._flash(self.TUT_STEPS[2],
-                                                  C["accent"]))
-                time.sleep(2)                  # 让用户看到「排队」一瞬
-                self.after(0, lambda: self.prod_detail.config(
-                    text="[3/4] 自动扫描发现素材,进入处理队列"))
-                n_ok, _ = self._daily_pass(str(dst.parent),
-                                           only_session=tut.TUTORIAL_SESSION)
-                if not n_ok:
-                    self.after(0, lambda: self._flash(
-                        "教程素材未被队列消费,请重试", C["warn"]))
-                    return
-                # ④ C2S-16(服务端豁免三前置,零生产副作用);演出「剪辑中」
-                #    倒计时(全程持续状态反馈,2026-10-22 用户反馈)
-                self.after(0, lambda: self._flash(self.TUT_STEPS[3],
-                                                  C["accent"]))
-                for left in range(70, 0, -10):
-                    self.after(0, lambda l=left: self.prod_detail.config(
-                        text=f"[4/4] 自动剪辑中…预计还需 {l} 秒"
-                             "（真实场景约 20 分钟）"))
-                    time.sleep(10)
-                try:
-                    r = tut.call_tutorial_api()
-                    works = (r.get("produce") or {}).get("works_url", "")
-                except Exception as e:          # noqa: BLE001 旧后端/超限降级
-                    LOG.warning("教程 C2S-16 降级:%s", e)
-                    works = ""
-                # ④b C2S-17 微信推送(REQ-20261022-003):教程完成后企微
-                #    收「体验成片已就绪」+作品页链接;notified=false(未绑定/
-                #    未配置/不可用)静默——结束卡已兜底引导
-                notified = False
-                try:
-                    nr = tut.call_tutorial_notify()
-                    notified = bool((nr or {}).get("notified"))
-                except Exception as e:          # noqa: BLE001 推送失败不断流程
-                    LOG.warning("教程 C2S-17 降级:%s", e)
-                # ⑤ 收口:出片态+结束卡
-                tut.mark_done()
-                push_note = ("\n成片链接也发到你的微信了,注意查收。"
-                             if notified else "")
-                self.after(0, lambda: (self._flash(self.TUT_STEPS[4],
-                                                   C["good"], sticky=True),
-                                       self._tray_tip("教程完成"),
-                                       self._prod_refresh(),
-                                       self.tutorial_btn.config(
-                                           text="再看一遍", state="normal")))
-                if works:
-                    from toolbox.uploader import works_full_url
-                    url = works_full_url(api, works)
-                    self.after(1200, lambda: self._tutorial_finale(url))
-            except Exception as e:              # noqa: BLE001 教程失败不杀主窗
-                LOG.warning("新手教程异常:%s", e)
-                self.after(0, lambda: (self._flash(
-                    "教程流程出错了,请重试", C["bad"]),
-                    self.tutorial_btn.config(state="normal")))
-            finally:
-                self.tutorial_busy = False
-        threading.Thread(target=run, daemon=True,
-                         name="tutorial").start()
+                res = envcheck.run(progress=progress, watch_dir=wdir,
+                                   user_id=uid)
+            except Exception as e:              # noqa: BLE001 检测失败不杀窗
+                LOG.warning("环境检测异常:%s", e)
+                res = None
+            self.after(0, lambda r=res: self._env_done(r, t0, manual))
+        threading.Thread(target=run, daemon=True, name="envcheck").start()
 
-    def _tutorial_finale(self, url):
-        """结束卡(模态):总结+跳作品页+衔接真实使用。"""
+    def _env_done(self, result, t0, manual):
+        from toolbox import envcheck
+        self._env_busy = False
+        if not result:
+            self._flash("环境检测出错了，稍后可再点「重新检测」", C["bad"],
+                        sticky=True)
+            self._render_env()
+            return
+        self._env = result
+        self._render_env()
+        cost = int(time.time() - t0)
+        if result.get("ok"):
+            head = ("环境检测通过" if not result.get("warn")
+                    else f"环境可用（{result.get('warn')} 项提示）")
+            self._flash(f"{head}，用时 {cost} 秒", C["good"], sticky=True)
+            self._tray_tip("环境检测通过")
+            if manual:
+                self._env_dialog()
+        else:
+            bad = "、".join(i["label"] for i in result.get("items", [])
+                            if i.get("level") == "bad")
+            self._flash(f"环境检测发现问题：{bad}", C["bad"], sticky=True)
+            self._tray_tip("环境检测异常")
+            self._env_dialog()
+
+    def _env_dialog(self):
+        """检测详情(模态):六项结果 + 预计耗时 + 重新检测/关闭。"""
+        from toolbox import envcheck
+        r = self._env or {}
         win = tk.Toplevel(self)
-        win.title("新手教程完成")
+        win.title("环境检测")
         win.resizable(False, False)
         win.configure(bg=BRAND["page"])
         win.transient(self)
-        f = ttk.Frame(win, padding=(18, 14))
+        f = ttk.Frame(win, padding=(16, 12))
         f.pack(fill="both", expand=True)
-        tk.Label(f, text="体验完成!🎉", bg=BRAND["page"], fg=BRAND["deep"],
-                 font=(FONT, 13, "bold")).pack(anchor="w")
-        tk.Label(f, text="刚才的一切——扫描、剪辑、出 3 条候选——"
-                         "以后每天都会自动发生。\n"
-                         "你只需要保持录像文件夹有新录像。" + push_note,
-                 bg=BRAND["page"], fg=C["fg"], font=(FONT, 10),
-                 justify="left", wraplength=380).pack(anchor="w", pady=(8, 10))
+        head = "环境可用" if r.get("ok") else "这台电脑暂时不能剪片"
+        color = C["good"] if r.get("ok") else C["bad"]
+        tk.Label(f, text=head, bg=BRAND["page"], fg=color,
+                 font=(FONT, 12, "bold")).pack(anchor="w")
+        if r.get("checked_at"):
+            tk.Label(f, text=f"检测时间 {r['checked_at']}",
+                     bg=BRAND["page"], fg=C["dim"], font=(FONT, 8)).pack(
+                anchor="w")
+        for icon, text in envcheck.detail_lines(r):
+            row = tk.Frame(f, bg=BRAND["page"])
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=icon, bg=BRAND["page"],
+                     fg={"✓": C["good"], "!": C["warn"], "✗": C["bad"]}.get(
+                         icon, C["dim"]),
+                     font=(FONT, 9, "bold"), width=2).pack(side="left")
+            tk.Label(row, text=text, bg=BRAND["page"], fg=C["fg"],
+                     font=(FONT, 9), anchor="w",
+                     wraplength=400, justify="left").pack(side="left",
+                                                         fill="x",
+                                                         expand=True)
+        est = (r.get("estimate") or {}).get("min_per_30")
+        if est:
+            tk.Label(f, text="说明：识别耗时按每秒 1 帧、多进程并行估算；"
+                             "真实链路只识别画面局部，通常更快。",
+                     bg=BRAND["page"], fg=C["dim"], font=(FONT, 8),
+                     wraplength=420, justify="left").pack(anchor="w",
+                                                          pady=(6, 0))
+        if not r.get("ok"):
+            tk.Label(f, text="可以先按上面的提示处理；处理不了就把这张单子"
+                             "截图发给大师姐。",
+                     bg=BRAND["page"], fg=C["warn"], font=(FONT, 8),
+                     wraplength=420, justify="left").pack(anchor="w",
+                                                          pady=(4, 0))
         row = ttk.Frame(f)
-        row.pack(fill="x", pady=(0, 6))
-        ttk.Button(row, text="打开作品页(体验内容)", width=22,
-                   command=lambda: webbrowser.open(url)).pack(
-            side="left", padx=(0, 8))
-        ttk.Button(row, text="完成", width=8,
+        row.pack(fill="x", pady=(10, 0))
+        ttk.Button(row, text="重新检测", width=10,
+                   command=lambda: (win.destroy(), self._env_run(True))
+                   ).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text="关闭", width=8,
                    command=win.destroy).pack(side="left")
-        tk.Label(f, text="微信还没绑定的话,记得去「账号设置」绑定,"
-                         "并联系大师姐开通权益。",
-                 bg=BRAND["page"], fg=C["dim"], font=(FONT, 8),
-                 wraplength=380, justify="left").pack(anchor="w")
         win.wait_visibility()
         win.grab_set()
 
-    def _daily_pass(self, wdir, only_session=None):
-        """跑完当前全部就绪任务（顺序，单日上限 100 保护）。
-        only_session(REQ-20261022-002):教程流程只消费教程会话,用户真实
-        场次留在队列(防止教程把真实场次一起拉起跑——黑框+误跑链)。"""
+    def _daily_pass(self, wdir):
+        """跑完当前全部就绪任务（顺序，单日上限 100 保护）。"""
         import toolbox.folder_watch as fw
         n_ok = n_fail = 0
         for _ in range(100):
-            new, results = fw.process_pending(wdir, only_session=only_session)
+            new, results = fw.process_pending(wdir)
             if not results:
                 break
             for session, ok, log in results:
@@ -1184,8 +1256,9 @@ class PetWindow(tk.Tk):
             state = (result or {}).get("state")
             if state == "done":
                 from toolbox.uploader import works_full_url
-                url = works_full_url(api_prod,
-                                     (result or {}).get("works_url", ""))
+                works = (result or {}).get("works_url", "")
+                url = works_full_url(api_prod, works)
+                self._save_last_works(session, works)
                 msg = "成片完成！3 条候选已就绪"
                 LOG.info("%s（%s）", msg, url)
                 self.after(0, lambda: (self._flash(msg + "，点「我的作品」"

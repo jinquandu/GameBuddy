@@ -160,6 +160,7 @@ data/remixes/（手动上传发布）
 | C2S-13 | 生产任务查询 | 端→服务端 | HTTPS | `GET /api/production/v1/jobs/<job_id>` | **已冻结（1.4.0，未上线）** |
 | C2S-14 | 受控产物读取 | 端→服务端 | HTTPS | `GET /api/production/v1/jobs/<job_id>/artifacts/<file_id>` | **已冻结（1.4.0，未上线）** |
 | C2S-16 | 新手教程识别 | 端→服务端 | HTTPS | `POST /api/production/v1/tutorial`（登录态；豁免权益/绑定；零生产副作用） | 已实施（1.4.1 补录,REQ-20261022-002） |
+| C2S-17 | 教程完成微信推送 | 端→服务端 | HTTPS | `POST /api/production/v1/tutorial/notify`（登录态；共用教程配额；未绑定/通知不可用→notified=false） | 已实施（1.4.2 补录,REQ-20261022-003） |
 | INT-1 | 原请求身份核验 | cut_server→账号服务 | 内部互信 HTTPS | `POST /internal/v1/account/authorize` | **已冻结（1.4.0，未上线）** |
 | INT-2 | 生产任务提交/查重 | 账号服务→cut_server | 内部互信 HTTPS | `POST /internal/v1/production/jobs` | **已冻结（1.4.0，未上线）** |
 | INT-3 | 上传回执查询 | 账号服务→cut_server | 内部互信 HTTPS | `GET /internal/v1/production/uploads/<upload_id>/receipt` | **已冻结（1.4.0，未上线）** |
@@ -616,6 +617,27 @@ POST /api/production/v1/tutorial      Authorization: Bearer <登录会话>（DSJ
 - **限频**：每账号每日 ≤3 次,超限 429 `rate_limited`;
 - 响应即时(客户端自行演出「剪辑中」节奏);demo 作品页走公网 GET 入口
   (REQ-20261022-001),写操作仍被拒;
+- **客户端消费状态（2026-10-22 / REQ-20261022-005）**：应用端自 1.4.1 起曾实现本节调用（新手教程全流程），自 2026-10-22 用户指示「新手教程替换为环境检测」后**不再调用**；接口与服务端行为保留，供旧版本客户端与历史记录使用，无删除计划。
+
+### C2S-17 教程完成微信推送（1.4.2 补录，REQ-20261022-003）
+
+```
+POST /api/production/v1/tutorial/notify   Authorization: Bearer <登录会话>
+→ 200 {"notified": true|false}
+```
+
+- **鉴权**：同 C2S-16(仅登录);未先完成当日教程 → 429 `rate_limited`
+  (与 C2S-16 共用每日 ≤3 次配额,本接口不单独计数);
+- **零生产副作用**:不建候选组、不入队列、不写用户生产态、不占通知服务
+  每日批次;
+- **通知动作**(服务端内部):调通知服务 `POST /v1/internal/tutorial-notification`
+  `{"user_id","works_url"}`(内部互信 Bearer),由通知服务解析该 user 已绑定
+  微信并发送;**豁免 notification_opt_in**(教程一次性体验推送);
+- `notified=false` 的三种情形:未绑定微信、通知服务未配置(env
+  `NOTIFY_INTERNAL_URL`/`NOTIFY_API_TOKEN`)、通知服务不可达——客户端
+  静默降级(结束卡已有绑定引导),不视为失败。
+
+- **客户端消费状态（2026-10-22 / REQ-20261022-005）**：应用端自 1.4.1 起曾实现本节调用（新手教程全流程），自 2026-10-22 用户指示「新手教程替换为环境检测」后**不再调用**；接口与服务端行为保留，供旧版本客户端与历史记录使用，无删除计划。
 
 ### 与既有接口的关系
 
@@ -828,6 +850,8 @@ import-session 幂等重跑保留）。
 
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
+| 2026-10-22 | 无版本变更（客户端消费面退役） | C2S-16 / C2S-17 | 应用端新手教程整体替换为**环境检测**（REQ-20261022-005）：客户端不再调用教程识别与教程推送，改为登录后本地六级检测（配置/磁盘/视频工具/demo 素材/解码/识别实测）。C2S-16/17 与服务端行为不变（仅登录、零生产副作用、每日≤3 次），保留给旧客户端；CONTRACT_VERSION 不变 | [REQ-20261022-005](../cut_kb/需求/REQ-20261022-005-环境检测替换新手教程.md) |
+| 2026-10-22 | 1.4.2(补录) | C2S-17 / §4A | 兼容性新增(REQ-20261022-003):教程完成微信推送 `POST /api/production/v1/tutorial/notify`(登录态、共用教程配额、未绑定/不可用→notified=false);通知侧需新增 `/v1/internal/tutorial-notification`(豁免 opt_in) |
 | 2026-10-22 | 1.4.1(补录) | C2S-16 / §4A | 兼容性新增（REQ-20261022-002）：新手教程识别 `POST /api/production/v1/tutorial`（登录态、豁免三前置、零生产副作用、每账号每日≤3 次）；demo 租户作品页复用公网 GET 入口。CONTRACT_VERSION 常量随下次发版同步 |
 | 2026-10-21 | 1.3.2 | §5.2 / C2S-3 | 兼容性新增（REQ-20261021-004）：manifest 可选键 **`logs`**（本次随包上传的端侧日志文件名列表）+ eval 包文件清单新增前缀 `sessions/<场次>/logs/<name>-YYYYMMDD.log`（尾部 512KB 快照，同日重跑覆盖）。端侧已实现（push 自动携带）；服务端 HTTPS 白名单放行该前缀为配合项待认领（未放行前 complete 报 400 invalid_path，端侧把日志加入清单会失败——放行前端侧不因此重试），rsync 通道天然可用。CONTRACT_VERSION 常量随下次发版同步 1.3.2 | [REQ-20261021-004](../cut_kb/需求/REQ-20261021-004-录像目录二级嵌套支持与本地日志随包上传.md) |
 | 2026-10-21 | 1.4.0（细则补录） | §4A C2S-12 / `/me` | 微信绑定三前置（REQ-20261021-001 规则1，方案A）：C2S-12 新增专属错误码 **`403 binding_required`** 与受理绑定核验细则（受理事务内现查 pc-bindings 桥、pending 视同未绑定、通知开关≠解绑、已受理任务不因解绑中止、换绑窗口拒绝新申请）；`/me` 形状首次补录并新增可缺省字段 `entitlements`/`binding.state`（端侧容错展示不缓存，权威判断在 C2S-12 受理层）。冻结接口形状/编号未变，CONTRACT_VERSION 不变 | [REQ-20261021-001](../cut_kb/需求/REQ-20261021-001-权益与每日生产规则.md)、[方案A](../cut_kb/想法/IDEA-20261019-006-方案A-微信绑定强制.md) |

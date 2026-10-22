@@ -38,11 +38,24 @@ check("latest_stats 形状", set(latest_stats()) == {
     "session", "knockdowns", "pickups", "voice", "queues"})
 
 # ---------------- 2) 主窗 GUI 冒烟（UI V1 对齐版）
-win = PetWindow()
-win.update()
+# 本机可能已登录(真实会话):屏蔽「登录后自动环境检测」(会真跑 OCR 基准 ≈10s),
+# 检测徽标由下面的纯渲染断言覆盖
+import toolbox.pet as _petmod
+_real_env_auto = _petmod.PetWindow._env_auto
+_petmod.PetWindow._env_auto = lambda self: None
+try:
+    win = PetWindow()
+    win.update()
+except Exception:
+    _petmod.PetWindow._env_auto = _real_env_auto
+    raise
 
 check("左导航三页齐", set(win._pages) == {"home", "works", "settings"}
       and all(win._nav_btns[k].winfo_ismapped() for k in win._nav_btns))
+check("新手教程入口已移除（REQ-20261022-005 替换为环境检测）",
+      not hasattr(win, "tutorial_btn") and not hasattr(win, "_tutorial_start"))
+check("开始剪辑条件四项齐（登录/权益/微信/环境）",
+      set(win.pre_labs) == {"login", "member", "bind", "env"})
 win._nav("settings")
 win.update()
 check("导航切换：设置页可见",
@@ -73,6 +86,36 @@ try:
           and win.bind_btn.winfo_manager() == "pack")
     check("侧栏权益卡：有效", "权益 ✓" in win.side_member.cget("text"))
 
+    # 环境检测徽标（REQ-20261022-005）：未登录=·；有结果后按通过/失败着色
+    win._sess = {}
+    win._env = {}
+    win._render_env()
+    win.update()
+    check("环境徽标：未登录为未检测",
+          "环境·" in win.pre_labs["env"].cget("text")
+          and "登录后自动检测" in win.env_detail.cget("text")
+          and str(win.env_btn.cget("state")) == "disabled")
+    win._sess = {"user_id": "u1"}
+    win._env = {"ok": True, "warn": 0, "checked_at": "2026-10-22 10:00:00",
+                "items": [], "estimate": {"min_per_30": 3.5}}
+    win._render_env()
+    win.update()
+    check("环境徽标：通过 ✓ 且给出预计耗时",
+          "环境✓" in win.pre_labs["env"].cget("text")
+          and "3.5 分钟" in win.env_detail.cget("text")
+          and str(win.env_btn.cget("state")) == "normal")
+    win._env = {"ok": False, "bad": 1, "warn": 0,
+                "checked_at": "2026-10-22 10:00:00",
+                "items": [{"key": "ocr", "label": "画面识别",
+                           "level": "bad", "detail": "太慢"}]}
+    win._render_env()
+    win.update()
+    check("环境徽标：失败 ✗ 且点名问题项",
+          "环境✗" in win.pre_labs["env"].cget("text")
+          and "画面识别" in win.env_detail.cget("text"))
+    win._sess = {}
+    win._env = {}
+
     win._render_pre({"logged_in": True, "member": True,
                      "member_expires": None, "binding": "bound",
                      "opt_in": True})
@@ -100,6 +143,7 @@ try:
               and "录像目录" in win.set_dir_lab.cget("text"))
 finally:
     _tc.persist_watch_dir = _real_persist
+    _petmod.PetWindow._env_auto = _real_env_auto
     win._save_hist()
 
 # 状态行短闪
