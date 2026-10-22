@@ -30,11 +30,11 @@ cmd //c build_exe.bat        # Git Bash 下;> /tmp/build_full.log 2>&1 收全量
   刚刚,`bat` 末尾 echo 无条件打印、管道会吃掉退出码,别信回显。
 - bat 自动做:备份 `dist\DashijiePet\data` → 打包 → 拷净化 config
   (从 config.example.yaml 派生,无租户键)→ 压 zip → 还原 data。
-- **GOTCHA(2026-10-21 实录):data 备份分支会静默失效**(条件不满足时
-  无报错),构建后 `dist\DashijiePet\data` 可能带着打包机设备身份+登录
-  会话。**构建后必做**:zip 泄漏扫描(下节)+ `data` 目录检查——
-  有则整目录移到 `dist\_data_backup\`(zip 在还原前打包所以通常干净,
-  但 dist 目录不能留)。
+- **构建后看到 `data\` ≠ 备份失效**(2026-10-22 复盘更正:此前一轮
+  误判为「静默失效」):它要么是 bat 设计内的备份还原(构建前有 data →
+  zip 后回移),要么是构建后烟测启动实例重新创建的。**真正的铁律只有
+  一条:zip 泄漏扫描 0 命中**(zip 永远在还原步骤前打包,历史三轮全部
+  干净)。发布目录形态前把 `data\` 移出 dist 即可。
 
 ## 3. 验收(四道关卡,按序)
 
