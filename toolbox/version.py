@@ -5,7 +5,7 @@
 PACKAGING.md 登记源码提交与哈希映射。
 """
 VERSION = "0.2.0"
-BUILD = "20261022-r7"
+BUILD = "20261022-r7f"
 PRODUCT = "陪玩大师姐"
 VENDOR = "大师姐"
 

@@ -314,6 +314,7 @@ class PetWindow(tk.Tk):
         self._env = {}
         self._env_busy = False
         self._env_auto_user = None
+        self._auth_notified = False   # 死会话提示只闪一次
         self._produce = {}          # session -> {state,error,works_url,ts}
         self._last_works = self._load_last_works()
 
@@ -660,14 +661,9 @@ class PetWindow(tk.Tk):
         from toolbox.diagnostics import mask_phone
         return mask_phone(phone or "")
 
-    def _acct_refresh(self):
-        from toolbox.account import AccountClient
-        api, prod = self._acct_cfg()
-        try:
-            sess = AccountClient(api, prod).session_summary()
-        except Exception:                      # noqa: BLE001
-            sess = {}
-        self._sess = sess or {}
+    def _render_acct_labels(self):
+        """账号卡与侧栏账号行(统一入口:刷新会话、死会话清空都走这里)。"""
+        sess, err = self._sess or {}, (self._pre.get("auth_error") or "")
         if sess:
             uid = str(sess.get("user_id", "?"))
             short = uid if len(uid) <= 14 else uid[:8] + "…" + uid[-4:]
@@ -676,10 +672,25 @@ class PetWindow(tk.Tk):
                 fg=BRAND["fg"])
             self.acct_btn.config(text="退出")
             self.side_acct.config(text=short, fg=BRAND["fg"])
+        elif err:
+            self.set_acct_lab.config(text="登录已失效，请重新登录",
+                                     fg=BRAND["danger"])
+            self.acct_btn.config(text="重新登录")
+            self.side_acct.config(text="登录已失效", fg=BRAND["danger"])
         else:
             self.set_acct_lab.config(text="未登录", fg=BRAND["dim"])
             self.acct_btn.config(text="登录")
             self.side_acct.config(text="未登录", fg=BRAND["dim"])
+
+    def _acct_refresh(self):
+        from toolbox.account import AccountClient
+        api, prod = self._acct_cfg()
+        try:
+            sess = AccountClient(api, prod).session_summary()
+        except Exception:                      # noqa: BLE001
+            sess = {}
+        self._sess = sess or {}
+        self._render_acct_labels()
         self._env_refresh()
         if sess:
             self._env_auto()
@@ -714,6 +725,25 @@ class PetWindow(tk.Tk):
         pre = self._pre
         mark = {True: ("✓", "good"), False: ("✗", "bad"),
                 None: ("·", "dim")}
+        auth_err = pre.get("auth_error") or ""
+        if auth_err:
+            # 服务端已吊销:本地会话已被 prerequisites 清掉,界面同步清账号卡
+            # (无会话时也要重绘——否则侧栏停在「未登录」,与徽标「已失效」不一致)
+            if self._sess:
+                self._sess = {}
+                self._env = {}
+                self._render_env()
+            self._render_acct_labels()
+        if auth_err and not self._auth_notified:
+            self._auth_notified = True
+            msg = pre.get("auth_message") or "登录已失效，请重新登录"
+            # AccountError.__str__ 形如 "[code] message"：去掉重复的码前缀
+            msg = re.sub(r"^\[[^\]]+\]\s*", "", str(msg)).strip()
+            self._flash(f"登录已失效：{msg}（{auth_err}）", BRAND["danger"],
+                        sticky=True)
+            self._tray_tip("登录已失效")
+        elif not auth_err:
+            self._auth_notified = False
         binding = pre.get("binding")
         for key, val in (("login", pre.get("logged_in")),
                          ("member", pre.get("member")),
@@ -1033,6 +1063,11 @@ class PetWindow(tk.Tk):
         badge, detail, act, cmd = "…", "", None, None
         if not prod.get("wdir"):
             badge, detail = "选择录像文件夹", "点「更换文件夹」选好目录，之后就全自动了"
+        elif pre.get("auth_error"):
+            badge = "登录已失效"
+            detail = ("这台电脑的登录已被服务端撤销（换机或安全策略）。"
+                      "点右侧重新登录，登录后会继续自动剪辑")
+            act, cmd = "重新登录", self._acct_click
         elif api and not pre.get("logged_in"):
             badge, detail = "未登录", "登录后就会自动为你剪辑（每天到点自动开始）"
             act, cmd = "去登录", self._acct_click
@@ -1083,7 +1118,8 @@ class PetWindow(tk.Tk):
             detail = "点「账号设置 → 环境」看哪一项不行，处理后重新检测"
             act, cmd = "看检测", self._env_click
         self.prod_badge.config(text=badge)
-        color = {"未登录": BRAND["bad"], "微信还没绑定": BRAND["warn"],
+        color = {"未登录": BRAND["bad"], "登录已失效": BRAND["bad"],
+                 "微信还没绑定": BRAND["warn"],
                  "还没有开通权益": BRAND["bad"], "剪辑中…": BRAND["primary"],
                  "云端生成中…": BRAND["primary"], "选择录像文件夹": BRAND["dim"],
                  "录像还不够": BRAND["dim"], "结果待确认": BRAND["warn"],
@@ -1257,7 +1293,11 @@ class PetWindow(tk.Tk):
                 jobs=(self._prod.get("jobs") or []),
                 summary=(self._prod.get("summary") or {}),
                 produce=self._produce,
-                extra_lines=[f"本地队列完成 {len(self._produce)} 条云端记录"])
+                extra_lines=[
+                    (f"登录状态：{self._pre.get('auth_error')} "
+                     f"{self._pre.get('auth_message', '')}"
+                     if self._pre.get("auth_error") else "登录状态：正常"),
+                    f"本地云端记录 {len(self._produce)} 条"])
             path = diagnostics.save(text)
             self.clipboard_clear()
             self.clipboard_append(text)

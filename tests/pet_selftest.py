@@ -85,6 +85,43 @@ try:
     check("前置：未绑定亮去绑定", "微信✗" in win.pre_labs["bind"].cget("text")
           and win.bind_btn.winfo_manager() == "pack")
     check("侧栏权益卡：有效", "权益 ✓" in win.side_member.cget("text"))
+    # REQ-20261022-008 验收发现:本地有会话但服务端 401 吊销 → 不得显示
+    # 「登录✓ + 其余未知」,要报「登录已失效」并给重新登录入口
+    win._sess = {"user_id": "dsj_deadbeef", "phone": "17621195726"}
+    win._render_acct_labels()
+    win._render_pre({"logged_in": False, "member": None,
+                     "member_expires": None, "binding": None, "opt_in": None,
+                     "auth_error": "device_revoked",
+                     "auth_message": "登录会话已失效，请重新登录"})
+    win._render_prod({"wdir": "D:/录像",
+                      "summary": {"queued": 0, "running": 0, "done": 0,
+                                  "failed": []},
+                      "produce": {}, "last_works": {}})
+    win.update()
+    check("死会话：徽标报登录已失效",
+          "登录已失效" in win.prod_badge.cget("text")
+          and "重新登录" in win.prod_act.cget("text"))
+    check("死会话：登录徽标 ✗（不显示✓）",
+          "✗" in win.pre_labs["login"].cget("text"))
+    check("死会话：提示含原因", "device_revoked" in win._status_text
+          or "登录已失效" in win._status_text)
+    check("死会话：账号卡与侧栏不再显示旧账号",
+          "登录已失效" in win.set_acct_lab.cget("text")
+          and win.acct_btn.cget("text") == "重新登录"
+          and "dsj_" not in win.side_acct.cget("text"))
+    # 无会话 + 吊销留痕(重启后):侧栏也必须是「登录已失效」,不能退回「未登录」
+    win._sess = {}
+    win._render_pre({"logged_in": False, "member": None,
+                     "member_expires": None, "binding": None, "opt_in": None,
+                     "auth_error": "invalid_token",
+                     "auth_message": "[invalid_token] 登录已过期，请重新登录"})
+    win.update()
+    check("死会话：重启后侧栏仍报已失效",
+          "登录已失效" in win.side_acct.cget("text")
+          and win.acct_btn.cget("text") == "重新登录")
+    win._render_pre({"logged_in": True, "member": True,
+                     "member_expires": None, "binding": "bound",
+                     "opt_in": True})
 
     # 环境检测徽标（REQ-20261022-005）：未登录=·；有结果后按通过/失败着色
     win._sess = {}

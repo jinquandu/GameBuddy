@@ -186,6 +186,7 @@ class AccountClient:
     def logout(self):
         bearer, _ = self._bearer()
         di.clear_session()
+        di.clear_revoked()          # 主动退出=正常未登录,不留「已失效」痕
         if bearer:
             try:
                 self._request(self.api, "POST", "/logout", bearer=bearer)
@@ -329,26 +330,52 @@ class AccountClient:
         """三前置看板数据（方案A L1 体验层，登录∧权益∧绑定）。member/
         member_expires/binding/opt_in 缺失 = None（未知，服务端未返回或
         网络失败）——L1 不是安全边界，未知不拦截、不缓存，权威判断在
-        C2S-12 服务端受理。"""
+        C2S-12 服务端受理。
+
+        auth_error(REQ-20261022-008 本机验收发现):本地会话看起来有效、
+        /me 却返回 401(device_revoked / unauthorized) 时,不能再显示
+        「登录✓ + 其它未知」——那是死会话,用户不知道该重新登录。此时
+        清掉本机会话并把登录态置为未登录,`auth_error` 带错误码、
+        `auth_message` 带服务端原话,界面据此提示重新登录。401 以外的
+        失败(网络/5xx)仍按「未知」处理,不误清会话。"""
         out = {"logged_in": False, "member": None, "member_expires": None,
-               "binding": None, "opt_in": None}
+               "binding": None, "opt_in": None,
+               "auth_error": "", "auth_message": ""}
         bearer, _ = self._bearer()
         out["logged_in"] = bool(bearer)
         if not bearer:
+            # 无会话但留有吊销痕(上次 401 被清):继续报「登录已失效」直到
+            # 重新登录成功,避免刷新后倒退回「未登录」
+            mark = di.revoked()
+            if mark:
+                out["auth_error"] = mark.get("code") or "unauthorized"
+                out["auth_message"] = (
+                    f"登录已于 {mark.get('at', '')} 失效，请重新登录")
             return out
         try:
             s = self.me_summary()
             out["member"] = s["membership_active"]
             out["member_expires"] = s["membership_expires_at"]
             out["binding"] = s["binding_state"]   # /me 已扩展则单次取齐
-        except AccountError:
-            pass
+        except AccountError as e:
+            if getattr(e, "status", None) == 401:
+                di.clear_session()
+                di.mark_revoked(e.code, str(e))
+                out.update(logged_in=False,
+                           auth_error=e.code or "unauthorized",
+                           auth_message=str(e))
+                return out
         if out["binding"] is None or out["opt_in"] is None:
             try:                                   # 既有绑定端点兜底/补齐
                 b = self.wechat_binding()
                 if out["binding"] is None:
                     out["binding"] = b["state"]
                 out["opt_in"] = b["opt_in"]
-            except AccountError:
-                pass
+            except AccountError as e:
+                if getattr(e, "status", None) == 401 and out["binding"] is None:
+                    di.clear_session()
+                    di.mark_revoked(e.code, str(e))
+                    out.update(logged_in=False,
+                               auth_error=e.code or "unauthorized",
+                               auth_message=str(e))
         return out

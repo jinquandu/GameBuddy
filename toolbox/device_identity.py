@@ -24,6 +24,7 @@ from toolbox.config import DATA
 DEVICE_DIR = DATA / ".device"
 KEY_FILE = DEVICE_DIR / "pc-device-v1.dpapi"
 SESSION_FILE = DEVICE_DIR / "session.json"      # DPAPI 包裹的账号会话
+REVOKE_FILE = DEVICE_DIR / "session_revoked"    # 服务端吊销留痕(仅码/时间)
 
 SPEC = "DSJ-PC-1"
 
@@ -207,9 +208,46 @@ def verify_request(headers: dict, method: str, raw_path_with_query: str,
 # ---------------------------------------------------------------- 账号会话存储
 
 def save_session(sess: dict):
-    """会话（含 bearer）DPAPI 包裹落盘；明文不进普通配置/日志。"""
+    """会话（含 bearer）DPAPI 包裹落盘；明文不进普通配置/日志。
+
+    写入成功会话 = 重新登录成功，顺手清掉吊销留痕（否则界面会一直提示
+    「登录已失效」）。"""
     blob = json.dumps(sess, ensure_ascii=False).encode("utf-8")
     _secure_write(SESSION_FILE, _wrap(blob))
+    clear_revoked()
+
+
+def mark_revoked(code="", message=""):
+    """记录「服务端已吊销本机会话」。只存错误码/时间，不存令牌。
+
+    为什么持久化：prerequisites 发现 401 时会清掉本地会话，若不留痕，
+    下一次刷新就只能显示「未登录」，用户看不出是「被吊销需要重新登录」
+    还是「从没登录过」（2026-10-22 本机验收发现）。"""
+    try:
+        DEVICE_DIR.mkdir(parents=True, exist_ok=True)
+        f = REVOKE_FILE
+        f.write_text(json.dumps(
+            {"code": str(code or "unauthorized")[:64],
+             "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+            ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def revoked():
+    """-> {"code","at"} 或 {}；无留痕/损坏返回 {}。"""
+    try:
+        d = json.loads(REVOKE_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) and d.get("code") else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def clear_revoked():
+    try:
+        REVOKE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def load_session() -> dict:

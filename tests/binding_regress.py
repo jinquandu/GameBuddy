@@ -148,13 +148,40 @@ def main():
                 raise AssertionError("未登录应拒绝")
             except account.AccountError as e:
                 check(e.code == "invalid_token", "未登录:绑定查询拒绝")
-            check(cli.prerequisites() == {"logged_in": False, "member": None,
-                                          "member_expires": None,
-                                          "binding": None, "opt_in": None},
-                  "prerequisites:未登录仅本地可判项")
+            _pre = cli.prerequisites()
+            check(_pre["logged_in"] is False and _pre["member"] is None
+                  and _pre["member_expires"] is None
+                  and _pre["binding"] is None and _pre["opt_in"] is None
+                  and _pre.get("auth_error") == "",
+                  "prerequisites:未登录仅本地可判项(无鉴权错误)")
 
             di.save_session({"user_id": "u1", "bearer": "tok-u1",
                              "expires_at_ts": time.time() + 3600})
+
+            # 401 死会话(REQ-20260822-008 验收发现):本地有 bearer 但服务端
+            # 已吊销 → 必须清会话、登录态置 false、带 auth_error,不能显示
+            # 「登录✓ + 其余未知」
+            di.save_session({"user_id": "u1", "bearer": "tok-dead",
+                             "expires_at_ts": time.time() + 3600})
+            _orig_me = cli.me
+            def _revoked():
+                raise account.AccountError("device_revoked",
+                                           "登录会话已失效，请重新登录", 401)
+            cli.me = _revoked
+            try:
+                _dead = cli.prerequisites()
+            finally:
+                cli.me = _orig_me
+            check(_dead["logged_in"] is False
+                  and _dead["auth_error"] == "device_revoked"
+                  and "重新登录" in _dead["auth_message"],
+                  "prerequisites:401 死会话 → 未登录 + auth_error")
+            check(not di.load_session().get("bearer"),
+                  "prerequisites:401 死会话已清本地会话")
+            di.save_session({"user_id": "u1", "bearer": "tok-u1",
+                             "expires_at_ts": time.time() + 3600})
+            for _k in ("auth_error", "auth_message"):
+                _pre.pop(_k, None)
 
             # wechat_binding 状态推导（绑定与通知开关分离）
             r = cli.wechat_binding()
@@ -206,9 +233,10 @@ def main():
             state["me"] = None
             state["binding"] = None
             pre = cli.prerequisites()
-            check(pre == {"logged_in": True, "member": None,
-                          "member_expires": None, "binding": "none",
-                          "opt_in": None},
+            check(pre["logged_in"] is True and pre["member"] is None
+                  and pre["member_expires"] is None
+                  and pre["binding"] == "none" and pre["opt_in"] is None
+                  and pre.get("auth_error") == "",
                   "prerequisites:回落 wechat-binding → none")
             state["binding_500"] = True                  # 网络失败 → 未知不拦
             pre = cli.prerequisites()

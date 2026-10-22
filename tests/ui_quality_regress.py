@@ -69,7 +69,7 @@ finally:
 lab = version.label()
 check(version.VERSION in lab and version.BUILD in lab, "版本:标签含版本与构建号")
 check(re.match(r"^\d+\.\d+\.\d+$", version.VERSION) is not None, "版本:语义版本号")
-check(re.match(r"^\d{8}-r\d+$", version.BUILD) is not None, "版本:构建号格式")
+check(re.match(r"^\d{8}-r\d+[a-z]*$", version.BUILD) is not None, "版本:构建号格式(允许 rN/ rNa 重打后缀)")
 
 # ---------------------------------------------------------------- 诊断(010)
 sample = diagnostics.build(
@@ -139,5 +139,61 @@ check("_progress_line" in fw_src and "running_progress" in fw_src,
       "状态:跑链阶段进度登记")
 check("scan_stats" in fw_src, "状态:目录扫描摘要")
 check("next_scan_ts" in fw_src and "mark_scan" in fw_src, "状态:下次检查时刻")
+
+# ---------------------------------------------------------------- 吊销留痕(008 验收)
+from toolbox import device_identity as di
+import tempfile as _tf
+def _isolate_device(td):
+    """四个设备路径全指向临时目录——只改 DEVICE_DIR 会让 save_session 写穿
+    到真实会话文件(2026-10-22 实测踩过)。"""
+    real = (di.DEVICE_DIR, di.KEY_FILE, di.SESSION_FILE, di.REVOKE_FILE)
+    d = Path(td)
+    di.DEVICE_DIR = d
+    di.KEY_FILE = d / "pc-device-v1.dpapi"
+    di.SESSION_FILE = d / "session.json"
+    di.REVOKE_FILE = d / "session_revoked"
+    return real
+
+
+def _restore_device(real):
+    di.DEVICE_DIR, di.KEY_FILE, di.SESSION_FILE, di.REVOKE_FILE = real
+
+
+with _tf.TemporaryDirectory() as td:
+    real_dev = _isolate_device(td)
+    try:
+        check(di.revoked() == {}, "吊销留痕:初始为空")
+        di.mark_revoked("device_revoked")
+        m = di.revoked()
+        check(m.get("code") == "device_revoked" and m.get("at"),
+              "吊销留痕:写入错误码与时间(不含令牌)")
+        raw = di.REVOKE_FILE.read_text(encoding="utf-8")
+        check("bearer" not in raw and "token" not in raw.lower(),
+              "吊销留痕:文件不含令牌")
+        di.save_session({"user_id": "u", "bearer": "t",
+                         "expires_at_ts": time.time() + 3600})
+        check(di.revoked() == {}, "吊销留痕:重新登录(保存会话)即清除")
+        di.mark_revoked("invalid_token")
+        di.clear_revoked()
+        check(di.revoked() == {}, "吊销留痕:主动清除生效")
+    finally:
+        _restore_device(real_dev)
+
+# 无会话但留痕 → prerequisites 继续报「已失效」,不倒退为「未登录」
+from toolbox.account import AccountClient
+from toolbox.config import load_config
+with _tf.TemporaryDirectory() as td:
+    real_dev = _isolate_device(td)
+    di.mark_revoked("device_revoked")
+    try:
+        a = load_config().get("account") or {}
+        pre = AccountClient(a.get("api_url") or "http://127.0.0.1:1",
+                            None).prerequisites()
+        check(pre["logged_in"] is False
+              and pre["auth_error"] == "device_revoked"
+              and "重新登录" in pre["auth_message"],
+              "吊销留痕:无会话时仍报已失效(不倒退)")
+    finally:
+        _restore_device(real_dev)
 
 print("PASS: " + str(ok) + " 项断言全部通过")
