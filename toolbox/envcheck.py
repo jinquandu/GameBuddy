@@ -386,7 +386,9 @@ def _tools_verdict(info):
 
 
 def _material_verdict(ok, err=""):
-    return ("ok", "体验素材就绪") if ok else ("bad", f"体验素材下载失败：{err}")
+    """素材取不到只影响「能否实测」,不代表机器不能用(多为网络/服务器
+    暂时不可达)——记 warn 并把整体标为「检测未完成」,不给假结论。"""
+    return ("ok", "体验素材就绪") if ok else         ("warn", f"体验素材下载失败（{err}），本次未能实测解码与识别")
 
 
 def _decode_verdict(info):
@@ -462,6 +464,9 @@ def summary_line(result=None):
     if not r:
         return "还没检测。登录后会检查这台电脑能不能稳定剪片（约 1-2 分钟）。"
     at = str(r.get("checked_at") or "")[5:16]
+    if r.get("incomplete"):
+        return (f"上次检测 {at}：未完成（体验素材下载失败），"
+                "检查网络后点「重新检测」")
     if not r.get("ok"):
         bad = "、".join(i.get("label", "") for i in r.get("items", [])
                         if i.get("level") == "bad")
@@ -543,7 +548,7 @@ def run(progress=None, watch_dir=None, io=None, user_id=""):
         except Exception as e:                 # noqa: BLE001
             level, detail = "bad", f"视频解码失败：{str(e)[:120]}"
     else:
-        level, detail = "bad", "素材未就绪，跳过解码实测"
+        level, detail = "warn", "素材未就绪，未能实测解码速度"
     items.append(_item("decode", "视频解码", level, detail))
 
     say(0.80, "[6/6] 实测画面识别…")
@@ -558,12 +563,13 @@ def run(progress=None, watch_dir=None, io=None, user_id=""):
         except Exception as e:                 # noqa: BLE001
             level, detail = "bad", f"画面识别失败：{str(e)[:120]}"
     else:
-        level, detail = "bad", "素材未就绪，跳过画面识别"
+        level, detail = "warn", "素材未就绪，未能实测画面识别速度"
     items.append(_item("ocr", "画面识别", level, detail))
 
     bad = sum(1 for i in items if i["level"] == "bad")
     warn = sum(1 for i in items if i["level"] == "warn")
     result = {"ok": bad == 0, "bad": bad, "warn": warn,
+              "incomplete": not okm,
               "checked_at": _now(), "ts": time.time(), "user_id": user_id,
               "machine": info, "disk": disk, "tools": tools,
               "bench": bench,

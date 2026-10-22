@@ -94,13 +94,6 @@ def main():
             check("发现问题" in ec.summary_line(r3),
                   "摘要行:不可用时给出问题项")
 
-            # ---- 素材下载失败:素材/解码/识别三项降级为 bad ----
-            r4 = ec.run(io=_stub_io(ok_material=False))
-            levels = {i["key"]: i["level"] for i in r4["items"]}
-            check(not r4["ok"] and levels["material"] == "bad"
-                  and levels["decode"] == "bad" and levels["ocr"] == "bad",
-                  "素材下载失败:相关项 bad,整体不可用")
-
             # ---- 落盘与读取 ----
             check(ec.last_result().get("checked_at") == r3["checked_at"],
                   "last_result:读取最近一次落盘结果")
@@ -115,6 +108,17 @@ def main():
                                                      "items": [],
                                                      "checked_at": "2026-10-22 10:00:00"}),
                   "摘要行:通过时给出预计识别耗时" if est else "摘要行")
+
+            # ---- 素材下载失败:记「检测未完成」,不误判机器不可用 ----
+            r4 = ec.run(io=_stub_io(ok_material=False))
+            levels = {i["key"]: i["level"] for i in r4["items"]}
+            check(r4["ok"] and r4["incomplete"] and r4["bad"] == 0
+                  and levels["material"] == "warn"
+                  and levels["decode"] == "warn" and levels["ocr"] == "warn",
+                  "素材下载失败:检测未完成(warn),不误判不可用")
+            check("未完成" in ec.summary_line(r4),
+                  "摘要行:未完成态提示重新检测")
+
 
             # ---- 旧教程素材迁移 ----
             old = t / "oldtut" / "demo-input.mp4"

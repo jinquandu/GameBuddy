@@ -113,6 +113,15 @@ try:
     check("环境徽标：失败 ✗ 且点名问题项",
           "环境✗" in win.pre_labs["env"].cget("text")
           and "画面识别" in win.env_detail.cget("text"))
+    # 共用电脑换号:上一个账号的检测结果不算到新账号头上
+    win._sess = {"user_id": "u2"}
+    win._env = {"user_id": "u1", "ok": True, "warn": 0,
+                "checked_at": "2026-10-22 10:00:00", "items": []}
+    win._render_env()
+    win.update()
+    check("环境徽标：换账号后按未检测显示",
+          "环境·" in win.pre_labs["env"].cget("text")
+          and "本账号还没检测" in win.env_detail.cget("text"))
     win._sess = {}
     win._env = {}
 

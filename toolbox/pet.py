@@ -1026,11 +1026,22 @@ class PetWindow(tk.Tk):
         self._env = envcheck.last_result()
         self._render_env()
 
+    def _env_result(self):
+        """当前账号的检测结果(磁盘结果若属其他账号视为无结果)。"""
+        uid = str((self._sess or {}).get("user_id") or "")
+        r = self._env or {}
+        if str(r.get("user_id") or uid) != uid:
+            return {}
+        return r
+
     def _render_env(self):
-        """渲染环境徽标 + 一行摘要;未登录时显示「登录后自动检测」。"""
+        """渲染环境徽标 + 一行摘要;未登录时显示「登录后自动检测」。
+        结果按账号区分:磁盘上的结果若属其他账号(共用电脑换号),按未检测
+        显示,不把上个账号的机器结论算到新账号头上。"""
         from toolbox import envcheck
         logged = bool(self._sess)
-        state = envcheck.result_state(self._env) if logged else "off"
+        res = self._env_result() if logged else {}
+        state = envcheck.result_state(res) if logged else "off"
         glyph, color = {"off": ("·", C["dim"]), "pass": ("✓", C["good"]),
                         "warn": ("!", C["warn"]), "fail": ("✗", C["bad"])
                         }[state]
@@ -1039,8 +1050,12 @@ class PetWindow(tk.Tk):
             self.env_detail.config(
                 text="登录后自动检测这台电脑能不能稳定剪片（约 1-2 分钟）",
                 fg=C["dim"])
+        elif not res:
+            self.env_detail.config(
+                text="本账号还没检测这台电脑，登录后会自动开始（约 1-2 分钟）",
+                fg=C["dim"])
         else:
-            self.env_detail.config(text=envcheck.summary_line(self._env),
+            self.env_detail.config(text=envcheck.summary_line(res),
                                    fg=C["dim"])
         self.env_btn.config(state="normal" if logged and not self._env_busy
                             else "disabled")
@@ -1071,7 +1086,7 @@ class PetWindow(tk.Tk):
             return
         if self._env_busy:
             return
-        if self._env:
+        if self._env_result():
             self._env_dialog()          # 有结果:先给详情,详情里可重新检测
         else:
             self._env_run(manual=True)
@@ -1115,7 +1130,11 @@ class PetWindow(tk.Tk):
         self._env = result
         self._render_env()
         cost = int(time.time() - t0)
-        if result.get("ok"):
+        if result.get("incomplete"):
+            self._flash("环境检测未完成（体验素材下载失败），"
+                        "检查网络后点「重新检测」", C["warn"], sticky=True)
+            self._tray_tip("环境检测未完成")
+        elif result.get("ok"):
             head = ("环境检测通过" if not result.get("warn")
                     else f"环境可用（{result.get('warn')} 项提示）")
             self._flash(f"{head}，用时 {cost} 秒", C["good"], sticky=True)
@@ -1132,7 +1151,7 @@ class PetWindow(tk.Tk):
     def _env_dialog(self):
         """检测详情(模态):六项结果 + 预计耗时 + 重新检测/关闭。"""
         from toolbox import envcheck
-        r = self._env or {}
+        r = self._env_result()
         win = tk.Toplevel(self)
         win.title("环境检测")
         win.resizable(False, False)
@@ -1140,8 +1159,10 @@ class PetWindow(tk.Tk):
         win.transient(self)
         f = ttk.Frame(win, padding=(16, 12))
         f.pack(fill="both", expand=True)
-        head = "环境可用" if r.get("ok") else "这台电脑暂时不能剪片"
-        color = C["good"] if r.get("ok") else C["bad"]
+        head = ("检测未完成" if r.get("incomplete")
+                else "环境可用" if r.get("ok") else "这台电脑暂时不能剪片")
+        color = (C["warn"] if r.get("incomplete")
+                 else C["good"] if r.get("ok") else C["bad"])
         tk.Label(f, text=head, bg=BRAND["page"], fg=color,
                  font=(FONT, 12, "bold")).pack(anchor="w")
         if r.get("checked_at"):
