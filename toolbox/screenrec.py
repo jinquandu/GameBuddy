@@ -1,7 +1,8 @@
 """桌面录制：屏幕 + 系统声音 → 按日期的场次目录（1级日期目录 / 2级分P）。
 
 python -m toolbox screenrec [--out <目录>] [--fps 60] [--segment-min 15] [--mic]
-（pet 卡的「录桌面/暂停/结束」按钮也走这里）
+（pet 工作台「桌面录制」卡片也走这里，out=录像目录：日期二级目录整体
+=队列里的一个任务）
 
 产物结构对齐场次契约，录完可直接 `python -m toolbox pipeline <场次目录>`：
   <out>/<YYYY-MM-DD 桌面录制>/<YYYY-MM-DD 桌面录制> P<k> DD日HH点MM分.mp4
@@ -28,6 +29,8 @@ python -m toolbox screenrec [--out <目录>] [--fps 60] [--segment-min 15] [--mi
   soundcard 缺失时降级纯视频（事件里提示）；
 - 分P轮转：每个分片带 `-t` 时长由 ffmpeg 自行退出（精确、文件必完整）；
   手动停止/暂停用 CTRL_BREAK_EVENT 优雅截断（此路径退出码 255 属正常），
+  且停录时音频写线程先关 ffmpeg stdin（EOF）——ffmpeg 主循环阻塞在
+  管道读时收不到 CTRL_BREAK 退出标志，不关会拖到超时强杀、mp4 缺 moov；
   等待超时才强杀兜底。
 
 日志：data/logs/screenrec.log（toolbox/logs.py，1MB×3 轮转）。
@@ -159,6 +162,15 @@ class ScreenRecorder:
                 try:
                     proc.stdin.write(pcm)
                 except (BrokenPipeError, ValueError, OSError):
+                    pass
+            # 会话停止：主动关音频管道（EOF）。ffmpeg 主循环阻塞在 stdin
+            # 读时收不到 CTRL_BREAK 退出标志，不关管道会拖到超时强杀、
+            # mp4 缺 moov（2026-10-26 实测）。轮转/暂停不进此分支，管道存活。
+            proc = self._proc
+            if proc is not None:
+                try:
+                    proc.stdin.close()
+                except (OSError, ValueError):
                     pass
 
         threading.Thread(target=writer, daemon=True).start()
@@ -293,11 +305,19 @@ class ScreenRecorder:
         except OSError:
             pass
         try:
-            p.wait(timeout=15)
+            p.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            LOG.warning("ffmpeg 优雅收尾超时，强杀 pid=%d", p.pid)
-            p.kill()
-            p.wait(timeout=5)
+            # 写线程未及关管道（异常路径等）：兜底 EOF 解开 stdin 阻塞读
+            try:
+                p.stdin.close()
+            except (AttributeError, OSError, ValueError):
+                pass
+            try:
+                p.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                LOG.warning("ffmpeg 优雅收尾超时，强杀 pid=%d", p.pid)
+                p.kill()
+                p.wait(timeout=5)
         try:
             p.stdin.close()
         except (AttributeError, OSError, ValueError):

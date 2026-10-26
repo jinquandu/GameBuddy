@@ -61,7 +61,8 @@ DEFAULTS = {
         "poll_sec": 30,      # watch 模式未开播时的轮询间隔（秒）
     },
     "screenrec": {
-        # ---- 桌面录制（toolbox/screenrec.py，python -m toolbox screenrec）----
+        # ---- 桌面录制（toolbox/screenrec.py；pet 工作台「桌面录制」卡片
+        # ---- 与 python -m toolbox screenrec 共用）----
         "fps": 60,           # 采集帧率（ddagrab 可达 60；回退 gdigrab 时自动降 30）
         "crf": 23,           # x264 质量（小=清晰大=省空间）
         "threads": 8,        # x264 编码线程上限。内存大头是帧线程缓冲：

@@ -164,7 +164,9 @@ python -m toolbox pet          # 素朴小窗：填地址一键跑全链
 - **失败续跑**：某阶段失败后主按钮变「↻ 续跑」，自动 `--skip` 已完成
   阶段只重跑失败环节及之后；语音评估按分P隔离——个别分P无 host 语音
   （如秒级测试段）只跳过该分P，不再炸整链；
-- 桌面录制入口已移出界面（CLI：`python -m toolbox screenrec`）；
+- 桌面录制：工作台「桌面录制」卡片（开始/暂停/结束，60 帧默认），文件
+  存到录像目录下按日期建的子文件夹（每天一个），整个文件夹作为队列的
+  一个任务自动排队剪辑；CLI 同功能：`python -m toolbox screenrec`；
   租户 ID 只在 `config.yaml` 的 `server.tenant` 维护；评估链默认开启
   （REQ-20261021-002：评估包上传后自动评分，`--no-run-eval` 显式关闭）；
 - 调试：`PET_SNAPSHOT=<目录> python -m toolbox pet` 启动后自动对各状态截屏；

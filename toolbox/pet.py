@@ -312,6 +312,8 @@ class PetWindow(tk.Tk):
         self.tray = None
         self.daily_stop = threading.Event()
         self.daily_thread = None
+        self._rec = None            # 桌面录制器（None=未在录）
+        self._rec_stopping = False
         self._status_text = ""
         self._status_sticky = False
         self._page_key = "home"
@@ -466,6 +468,26 @@ class PetWindow(tk.Tk):
                                  fg=BRAND["dim"], font=F_SMALL, anchor="w",
                                  wraplength=dpi.px(420), justify="left")
         self.dir_note.pack(fill="x", pady=(dpi.px(6), 0))
+
+        br = ui_kit.card(home, "桌面录制")
+        rec_row = tk.Frame(br, bg=BRAND["card"])
+        rec_row.pack(fill="x")
+        self.rec_lab = tk.Label(rec_row, text="未在录制", bg=BRAND["card"],
+                                fg=BRAND["fg"], font=F_BODY, anchor="w",
+                                wraplength=dpi.px(230), justify="left")
+        self.rec_lab.pack(side="left", fill="x", expand=True)
+        self.rec_pause_btn = ui_kit.button(rec_row, "暂停", self._rec_pause,
+                                           kind="ghost")
+        self.rec_btn = ui_kit.button(rec_row, "开始录制", self._rec_toggle,
+                                     kind="brand")
+        self.rec_btn.pack(side="right")
+        self.rec_note = tk.Label(br,
+                                 text="录到上面的录像文件夹里，每天一个"
+                                      "新文件夹，整个文件夹算一个任务",
+                                 bg=BRAND["card"], fg=BRAND["dim"],
+                                 font=F_SMALL, anchor="w",
+                                 wraplength=dpi.px(430), justify="left")
+        self.rec_note.pack(fill="x", pady=(dpi.px(6), 0))
 
         b2 = ui_kit.card(home, "今日进度")
         head2 = tk.Frame(b2, bg=BRAND["card"])
@@ -1377,6 +1399,138 @@ class PetWindow(tk.Tk):
         self._flash("录像目录已设置，后台会自动检查新增录像", BRAND["primary"])
         self._prod_refresh()
 
+    # ---------- 桌面录制 ----------
+
+    def _rec_toggle(self):
+        if self._rec is None:
+            self._rec_start()
+            return
+        if not self._rec_stopping:
+            self._rec_stop()
+
+    def _rec_start(self):
+        wdir = (self.watch_dir
+                or (load_config().get("folder_watch") or {}).get("watch_dir"))
+        if not wdir:
+            self._flash("先选好录像文件夹，录制会保存到那里", BRAND["warn"])
+            return
+        from toolbox.screenrec import ScreenRecorder
+        cfg = dict(load_config().get("screenrec") or {})
+        self._rec_stopping = False
+        self._rec = ScreenRecorder(Path(wdir), cfg,
+                                   on_event=self._rec_event_bg)
+        self._rec.start()
+        self.rec_btn.config(text="结束录制", state="normal")
+        self.rec_lab.config(text="启动中…")
+        self._flash("录制已开始，保存到录像文件夹（每天一个子文件夹）",
+                    BRAND["primary"])
+        self.after(1000, self._rec_tick)
+
+    def _rec_stop(self):
+        rec = self._rec
+        if rec is None:
+            return
+        self._rec_stopping = True
+        self.rec_btn.config(state="disabled")
+        self.rec_lab.config(text="收尾中…（正在写完当前文件）")
+        self.rec_pause_btn.pack_forget()
+
+        def fin():
+            try:
+                rec.stop(timeout=40)      # stop 事件回来后复位 UI
+            except Exception as e:        # noqa: BLE001
+                LOG.warning("停录异常：%s", e)
+                try:
+                    self.after(0, self._rec_event, "stop",
+                               {"secs": rec.elapsed(), "files": []})
+                except Exception:         # noqa: BLE001 窗口已销毁
+                    pass
+        threading.Thread(target=fin, daemon=True).start()
+
+    def _rec_pause(self):
+        rec = self._rec
+        if rec is None or self._rec_stopping:
+            return
+        if rec.paused:
+            rec.resume()
+        else:
+            rec.pause()
+        self._rec_render()
+
+    def _rec_event_bg(self, kind, payload):
+        """录制器回调在工作线程触发，统一 marshal 回 UI 线程。"""
+        try:
+            self.after(0, self._rec_event, kind, payload)
+        except Exception:                 # noqa: BLE001 退出路径窗口已销毁
+            pass
+
+    def _rec_event(self, kind, payload):
+        if kind == "error":
+            self._flash(payload.get("msg", ""), BRAND["warn"], sticky=True)
+            return
+        if kind != "stop":
+            self._rec_render()
+            return
+        # stop：整次录制结束（files 已收尾完整）
+        secs = payload.get("secs", 0)
+        files = payload.get("files", [])
+        self._rec = None
+        self._rec_stopping = False
+        self.rec_btn.config(text="开始录制", state="normal")
+        self._rec_render()
+        self.rec_note.config(
+            text=f"已录 {self._fmt_secs(secs)} · {len(files)} 个分P，"
+                 "约 10 分钟后整个文件夹自动排队剪辑")
+        self._flash(f"录制结束，共 {len(files)} 个文件", BRAND["primary"])
+        threading.Thread(target=self._rec_scan_after_stop, daemon=True).start()
+        self._prod_refresh()
+
+    def _rec_scan_after_stop(self):
+        """录完即扫一次队列（幂等）；文件判稳仍要 10 分钟，此处只提前
+        登记时刻，真正入队由本次或后续巡扫完成。"""
+        try:
+            import toolbox.folder_watch as fw
+            if self.watch_dir:
+                fw.scan(self.watch_dir)
+        except Exception as e:            # noqa: BLE001 扫描失败不惊扰
+            LOG.info("录后扫描跳过：%s", e)
+
+    def _rec_tick(self):
+        """录制中每秒刷状态行（时长/P 号）；录制器清空后自停。"""
+        if self._rec is None:
+            return
+        if not self._rec_stopping:
+            self._rec_render()
+        self.after(1000, self._rec_tick)
+
+    def _rec_render(self):
+        rec = self._rec
+        if rec is None:
+            self.rec_lab.config(text="未在录制")
+            self.rec_btn.config(text="开始录制", state="normal")
+            self.rec_pause_btn.pack_forget()
+            self.rec_note.config(
+                text="录到上面的录像文件夹里，每天一个新文件夹，"
+                     "整个文件夹算一个任务")
+            return
+        if rec.paused:
+            self.rec_lab.config(
+                text=f"已暂停 · 已录 {self._fmt_secs(rec.elapsed())}")
+            self.rec_pause_btn.config(text="继续")
+        else:
+            self.rec_lab.config(
+                text=f"录制中 P{rec._cur_part or 0}"
+                     f" · {self._fmt_secs(rec.elapsed())}")
+            self.rec_pause_btn.config(text="暂停")
+        self.rec_pause_btn.pack(side="right", padx=(0, dpi.px(8)),
+                                before=self.rec_btn)
+
+    @staticmethod
+    def _fmt_secs(s):
+        s = int(s)
+        h, m, sec = s // 3600, s % 3600 // 60, s % 60
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
     # ---------- 后台日任务 ----------
 
     RULES_POLL_S = 6 * 3600
@@ -1889,6 +2043,12 @@ class PetWindow(tk.Tk):
         step()
 
     def _on_close(self):
+        if self._rec is not None:          # 退出前先收尾录制（写完 moov）
+            try:
+                self._rec.stop(timeout=25)
+            except Exception as e:         # noqa: BLE001
+                LOG.warning("退出停录异常：%s", e)
+            self._rec = None
         if self.daily_thread is not None and self.daily_thread.is_alive():
             import toolbox.folder_watch as fw
             self.daily_stop.set()

@@ -184,14 +184,19 @@ def cmd_pet(args):
     run(address=args.address)
 
 
-def cmd_screenrec(args):
-    from toolbox.screenrec import record
+def _screenrec_cfg(args):
+    """args -> screenrec cfg：仅收显式传值，None 不下传（保住配置文件值）。"""
     cfg = {"mic": args.mic}
-    if args.segment_min is not None:      # 缺省不传，保住配置文件里的值
+    if args.segment_min is not None:
         cfg["segment_min"] = args.segment_min
     if args.fps is not None:
         cfg["fps"] = args.fps
-    record(out_dir=args.out, cfg=cfg)
+    return cfg
+
+
+def cmd_screenrec(args):
+    from toolbox.screenrec import record
+    record(out_dir=args.out, cfg=_screenrec_cfg(args))
 
 
 def cmd_detect(args):
