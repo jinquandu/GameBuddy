@@ -35,10 +35,10 @@ TPRIV = tk.private_bytes(serialization.Encoding.PEM,
                          serialization.PrivateFormat.PKCS8,
                          serialization.NoEncryption())
 
-latest = {"version": "0.3.0", "build": "20261101-r8",
+latest = {"version": "0.1", "build": "20261101-r9",
           "url": "/eval/clients/dashijie-pet-20261101-r8.zip",
           "sha256": "a" * 64, "size": 389140625,
-          "notes": "修复与新增", "min_required": "0.2.0",
+          "notes": "修复与新增", "min_required": "0.1",
           "released_at": "2026-11-01 12:00:00"}
 
 check(len(us.UPDATE_PUBKEY) == 64 and us.UPDATE_PUBKEY != TPUB,
@@ -102,7 +102,10 @@ d = au.parse_manifest(make_manifest(disabled=True), pubkey_hex=TPUB)
 check(d["disabled"] is True, "清单:停用开关解析")
 
 # ---------------------------------------------------------------- 版本比较
-check(au.newer_than("0.3.0", "20261101-r8") is True, "版本:0.3.0>内置")
+check(au.newer_than("0.1", "20261101-r9") is True,
+      "版本:恒定 0.1 时靠构建号判新(r9>r8b)")
+check(au.newer_than("0.1", "20261026-r8a") is False,
+      "版本:旧构建不触发")
 check(au.newer_than("0.1.0", "20260101-r1") is False, "版本:更小不触发")
 check(au.newer_than(version_cur_x := au.BUILD, "20261022-r7f") is False
       if False else True, "版本:占位")
@@ -231,8 +234,8 @@ with tempfile.TemporaryDirectory() as td:
     real_upd = au.UPDATE_DIR
     au.UPDATE_DIR = tdir / "updates"
     try:
-        au.save_ready({"version": "0.3.0", "build": "20261101-r8"})
-        check(au.ready_info().get("build") == "20261101-r8",
+        au.save_ready({"version": "0.1", "build": "20261101-r9"})
+        check(au.ready_info().get("build") == "20261101-r9",
               "ready:落盘可恢复")
         au.UPDATE_DIR.joinpath("oldbuild").mkdir(parents=True, exist_ok=True)
         au.cleanup_old("20261101-r8")

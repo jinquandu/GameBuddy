@@ -224,7 +224,7 @@ python -m toolbox pull --template single_best    # 拉回服务端成片到 data
 | 配置块 | 常用项 | 说明 |
 | --- | --- | --- |
 | `recorder` | `qn` / `segment_min` / `stall_sec` / `poll_sec` | 直播录制参数（同上表） |
-| `screenrec` | `fps` / `crf` / `segment_min` / `mic` | 桌面录制：帧率/质量/分P分钟数/麦克风混录 |
+| `screenrec` | `fps` / `crf` / `threads` / `capture` / `segment_min` / `mic` | 桌面录制：帧率(默认60,ddagrab)/质量/x264线程上限(默认8,内存大头)/采集后端(dda\|gdi)/分P分钟数/麦克风混录 |
 | `download` | `cookies_file` / `qn` | cookie 文件路径与清晰度（80=1080P） |
 | `server` | `ssh_alias` / `remote_root` / `tenant` / `site_url` | push/pull 的 ssh 别名、服务端数据根、租户 |
 | `knockdown` | `pre_sec` / `post_sec` / `merge_sec` | 击倒片段留白与连杀合并窗口 |

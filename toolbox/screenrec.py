@@ -1,6 +1,6 @@
 """桌面录制：屏幕 + 系统声音 → 按日期的场次目录（1级日期目录 / 2级分P）。
 
-python -m toolbox screenrec [--out <目录>] [--segment-min 15] [--mic]
+python -m toolbox screenrec [--out <目录>] [--fps 60] [--segment-min 15] [--mic]
 （pet 卡的「录桌面/暂停/结束」按钮也走这里）
 
 产物结构对齐场次契约，录完可直接 `python -m toolbox pipeline <场次目录>`：
@@ -15,7 +15,14 @@ python -m toolbox screenrec [--out <目录>] [--segment-min 15] [--mic]
 - stop() 结束（优雅写完 mp4 尾）。
 
 技术路线：
-- 视频：ffmpeg gdigrab 全桌面 + libx264（系统自带能力，无需装驱动）；
+- 视频：ffmpeg ddagrab（Desktop Duplication API）全主屏 + libx264。
+  ddagrab 是 60 帧的前提：gdigrab 在 2560x1440 实测只采得到 ~34 帧/s
+  （时间戳硬凑 60 全靠重复帧，白耗编码）；ddagrab 可跑 57-58 帧。
+  启动前探测（抓 1 帧），不可用自动回退 gdigrab 并把帧率降到 30；
+  多显示器时 ddagrab 只采 output 0（主屏），gdigrab 采整个虚拟屏。
+  编码线程封顶 -threads（默认 8）：x264 默认开 ~1.5x 逻辑核数个帧线程，
+  帧线程缓冲是内存大头（1440p 默认 ~30 线程工作集 ~1.3GB，8 线程
+  ~0.6GB，实测 CPU 持平、画质不受影响——帧并行不改编码参数）；
 - 音频：soundcard WASAPI loopback 录系统声音（可选混录麦克风）→
   s16le 管道喂 ffmpeg；采集/写管道分线程+队列解耦防背压丢帧；
   soundcard 缺失时降级纯视频（事件里提示）；
@@ -68,11 +75,13 @@ class ScreenRecorder:
 
     def __init__(self, out_root, cfg=None, on_event=None):
         self.root = Path(out_root)
-        self.cfg = {"fps": 30, "crf": 23, "segment_min": 15, "mic": False}
+        self.cfg = {"fps": 60, "crf": 23, "segment_min": 15, "mic": False,
+                    "threads": 8, "capture": "dda"}
         self.cfg.update(cfg or {})
         self.on_event = on_event or (lambda *a: None)
         self._proc = None
         self._thread = None
+        self._dda_state = None    # ddagrab 可用性：None=未探测
         self._stop_flag = threading.Event()
         self._paused = threading.Event()
         self._t_start = 0.0
@@ -183,16 +192,63 @@ class ScreenRecorder:
 
     # ---------- ffmpeg
 
-    def _spawn(self, path: Path, audio: bool, dur: float):
+    def _dda_probe(self):
+        """ddagrab 可用性探测（抓 1 帧即退），结果缓存。"""
+        if self._dda_state is None:
+            try:
+                r = subprocess.run(
+                    ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                     "-nostdin", "-f", "lavfi", "-i", "ddagrab=0:framerate=30",
+                     "-frames:v", "1", "-f", "null", "-"],
+                    capture_output=True, timeout=10)
+                self._dda_state = (r.returncode == 0)
+            except (OSError, subprocess.TimeoutExpired):
+                self._dda_state = False
+        return self._dda_state
+
+    def _resolve_backend(self):
+        """选采集后端：dda（60 帧可达）优先，不可用回退 gdi。
+
+        回退时 gdigrab 高分辨率采不满高帧率（1440p 上限 ~34 帧/s，
+        时间戳硬凑全靠重复帧），自动把 fps 压回 30；显式配 capture=gdi
+        视为用户知情，不动 fps。
+        """
+        want = str(self.cfg.get("capture") or "dda").strip().lower()
+        if want == "gdi":
+            return "gdi"
+        if self._dda_probe():
+            return "dda"
+        self._dda_state = False
+        if float(self.cfg["fps"]) > 30:
+            self.cfg["fps"] = 30
+            self.on_event("error", {"msg": "60 帧采集（Desktop Duplication）"
+                                    "不可用，已回退 gdigrab 并降为 30 帧"})
+        else:
+            self.on_event("error", {"msg": "Desktop Duplication 不可用，"
+                                    "已回退 gdigrab"})
+        return "gdi"
+
+    def _spawn(self, path: Path, audio: bool, dur: float, backend="dda"):
         """起一个分P的 ffmpeg；-t 到点自行退出（精确轮转、文件完整）。"""
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-               "-nostdin",
-               "-f", "gdigrab", "-framerate", str(self.cfg["fps"]),
-               "-draw_mouse", "1", "-i", "desktop"]
+               "-nostdin"]
+        if backend == "dda":
+            cmd += ["-f", "lavfi",
+                    "-i", f"ddagrab=0:framerate={self.cfg['fps']}"
+                          ":draw_mouse=1"]
+        else:
+            cmd += ["-f", "gdigrab", "-framerate", str(self.cfg["fps"]),
+                    "-draw_mouse", "1", "-i", "desktop"]
         if audio:
             cmd += ["-f", "s16le", "-ar", str(RATE), "-ac", "2",
                     "-i", "pipe:0"]
+        cmd += ["-map", "0:v"]
+        if audio:
+            cmd += ["-map", "1:a"]
+        if backend == "dda":                 # D3D11 纹理 → 系统内存
+            cmd += ["-vf", "hwdownload,format=bgra"]
         cmd += ["-c:v", "libx264", "-preset", "veryfast",
+                "-threads", str(int(self.cfg.get("threads") or 8)),
                 "-crf", str(self.cfg["crf"]), "-pix_fmt", "yuv420p"]
         if audio:
             cmd += ["-c:a", "aac", "-b:a", "160k"]
@@ -312,9 +368,11 @@ class ScreenRecorder:
                              args=(ctx, mixer, ready), daemon=True).start()
             ready.set()
         seg = max(5.0, float(self.cfg["segment_min"]) * 60)
+        backend = self._resolve_backend()
+        LOG.info("采集后端=%s cfg=%s", backend, self.cfg)
         while not self._stop_flag.is_set():
             path = session / f"{title} P{part} {time.strftime('%d日%H点%M分')}.mp4"
-            self._proc = self._spawn(path, audio, seg)
+            self._proc = self._spawn(path, audio, seg, backend=backend)
             self.on_event("start", {"session": str(session), "path": str(path),
                                     "part": part, "audio": audio})
             self.files.append(path)
@@ -331,6 +389,17 @@ class ScreenRecorder:
             if reason is None:                   # 自然轮转
                 rc = self._proc.poll()
                 if rc not in (0, None):
+                    # dda 探测通过但起录即败（驱动/独占全屏等）→ 一次性回退
+                    if backend == "dda" and not path.exists():
+                        self._dda_state = False
+                        if float(self.cfg["fps"]) > 30:
+                            self.cfg["fps"] = 30
+                        backend = "gdi"
+                        if self.files and self.files[-1] == path:
+                            self.files.pop()     # 去掉没产出的占位路径
+                        self.on_event("error", {"msg": "60 帧采集启动失败，"
+                                                "已回退 gdigrab（30 帧）续录"})
+                        continue                # 同 P 号重开
                     LOG.error("ffmpeg 异常退出 rc=%d", rc)
                     self.on_event("error", {"msg": f"ffmpeg 异常退出（码 {rc}）"})
                     self.on_event("stop", self._summary(session))

@@ -68,7 +68,14 @@ finally:
 # ---------------------------------------------------------------- 版本(009)
 lab = version.label()
 check(version.VERSION in lab and version.BUILD in lab, "版本:标签含版本与构建号")
-check(re.match(r"^\d+\.\d+\.\d+$", version.VERSION) is not None, "版本:语义版本号")
+check(re.match(r"^\d+\.\d+(\.\d+)*$", version.VERSION) is not None,
+      "版本:版本号格式(对外恒定 0.1;内部曾用 x.y.z)")
+check(version.display() == "V0.1",
+      "版本:对外恒定显示 V0.1(用户指示 2026-10-26)")
+pet_src = Path("toolbox/pet.py").read_text(encoding="utf-8")
+check("version.display()" in pet_src
+      and "v{version.VERSION}" not in pet_src,
+      "版本:界面一律走 display(),不直接拼内部版本")
 check(re.match(r"^\d{8}-r\d+[a-z]*$", version.BUILD) is not None, "版本:构建号格式(允许 rN/ rNa 重打后缀)")
 
 # ---------------------------------------------------------------- 诊断(010)

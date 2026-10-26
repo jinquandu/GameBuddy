@@ -48,10 +48,15 @@ class UpdateError(RuntimeError):
 # ---------------------------------------------------------------- 版本比较
 
 def version_tuple(v):
+    """归一到三位(0.1 与 0.1.0 视为相等——对外恒定 0.1 后清单里两种
+    写法都可能出现,长度不等会被 Python 元组序误判大小)。"""
     try:
-        return tuple(int(p) for p in str(v).split("."))
+        parts = [int(p) for p in str(v).split(".") if p != ""]
     except ValueError:
-        return (0,)
+        return (0, 0, 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
 
 
 def build_tuple(b):

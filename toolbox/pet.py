@@ -429,7 +429,7 @@ class PetWindow(tk.Tk):
                                   fg=BRAND["dim"], font=F_SMALL, anchor="w",
                                   wraplength=dpi.px(116), justify="left")
         self.side_acct.pack(anchor="w", pady=(dpi.px(4), 0))
-        tk.Label(foot, text=f"v{version.VERSION} · {version.BUILD}",
+        tk.Label(foot, text=version.display(),
                  bg=BRAND["side"], fg=BRAND["faint"],
                  font=(FONT, 7)).pack(anchor="w", pady=(dpi.px(2), 0))
 
@@ -527,7 +527,7 @@ class PetWindow(tk.Tk):
         self.ver_lab = tk.Label(row1b, text="", bg=BRAND["card"],
                                 fg=BRAND["faint"], font=F_SMALL, anchor="e")
         self.ver_lab.pack(side="right")
-        self.ver_lab.config(text=f"v{version.VERSION}（{version.BUILD}）")
+        self.ver_lab.config(text=version.display())
         # 更新行(REQ-20261026-002):检查更新 + 就绪后的「重启并更新」
         row1c = tk.Frame(s1, bg=BRAND["card"])
         row1c.pack(fill="x", pady=(dpi.px(6), 0))
@@ -1315,7 +1315,7 @@ class PetWindow(tk.Tk):
         from toolbox import rules_sync
         rules_meta = rules_sync.applied_meta()
         upd = self._upd_info or {}
-        upd_line = ("更新：当前 v" + version.VERSION
+        upd_line = ("更新：当前 " + version.display()
                     + ("；新版本 v" + str((upd.get("latest") or {}).get(
                         "version", "?")) + " 已就绪待重启"
                        if self._upd_phase == "ready" else
@@ -1460,7 +1460,7 @@ class PetWindow(tk.Tk):
             self._upd_phase = "none"
             if manual:
                 self._ui(lambda: self._upd_render(
-                    f"已是最新版本（v{version.VERSION}）"))
+                    "已是最新版本"))
             else:
                 self._ui(lambda: self._upd_render(""))
             return
@@ -1468,7 +1468,7 @@ class PetWindow(tk.Tk):
         self._upd_info = info
         build = str(latest.get("build") or "")
         note = str(latest.get("notes") or "")[:80]
-        head = (f"发现新版本 v{latest.get('version')}（{build}）"
+        head = (f"发现新版本（{build}）"
                 + ("【建议尽快升级】" if info.get("required") else ""))
         if self._producing_now():
             self._upd_phase = "deferred"
@@ -1533,7 +1533,7 @@ class PetWindow(tk.Tk):
                                       "notes": r.get("notes", "")},
                           "required": r.get("required")}
         self.after(800, lambda: self._upd_ready_ui(
-            f"新版本 v{r.get('version')}（{r.get('build')}）",
+            f"新版本（{r.get('build')}）",
             str(r.get("notes") or "")[:80]))
 
     def _update_now(self):

@@ -61,9 +61,14 @@ DEFAULTS = {
         "poll_sec": 30,      # watch 模式未开播时的轮询间隔（秒）
     },
     "screenrec": {
-        # ---- 桌面录制（toolbox/screenrec.py，pet 卡「录桌面」按钮）----
-        "fps": 30,           # 采集帧率（gdigrab）
+        # ---- 桌面录制（toolbox/screenrec.py，python -m toolbox screenrec）----
+        "fps": 60,           # 采集帧率（ddagrab 可达 60；回退 gdigrab 时自动降 30）
         "crf": 23,           # x264 质量（小=清晰大=省空间）
+        "threads": 8,        # x264 编码线程上限。内存大头是帧线程缓冲：
+                             # 1440p 默认~30线程工作集~1.3GB，8线程~0.6GB，
+                             # 实测 CPU 持平（实时录制用不满默认并行度）
+        "capture": "dda",    # dda=Desktop Duplication(60帧,主屏)；gdi=gdigrab
+                             # （全虚屏，1440p 实测上限~34帧/s，仅回退用）
         "segment_min": 15,   # 单分P分钟数，到点轮转，P 号延续
         "mic": False,        # True 时把默认麦克风混录进音轨（系统声音始终录）
     },

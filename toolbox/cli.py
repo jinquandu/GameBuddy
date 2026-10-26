@@ -186,8 +186,12 @@ def cmd_pet(args):
 
 def cmd_screenrec(args):
     from toolbox.screenrec import record
-    record(out_dir=args.out, cfg={"segment_min": args.segment_min,
-                                  "mic": args.mic})
+    cfg = {"mic": args.mic}
+    if args.segment_min is not None:      # 缺省不传，保住配置文件里的值
+        cfg["segment_min"] = args.segment_min
+    if args.fps is not None:
+        cfg["fps"] = args.fps
+    record(out_dir=args.out, cfg=cfg)
 
 
 def cmd_detect(args):
@@ -278,6 +282,9 @@ def build_parser():
                     help="录像根目录（默认 video/，1级=日期场次目录，2级=分P）")
     sp.add_argument("--segment-min", type=float, default=None,
                     help="单分P分钟数（默认取配置 screenrec.segment_min=15）")
+    sp.add_argument("--fps", type=int, default=None,
+                    help="采集帧率（默认取配置 screenrec.fps=60；"
+                         "gdigrab 回退时自动降 30）")
     sp.add_argument("--mic", action="store_true",
                     help="把默认麦克风混录进音轨（默认只录系统声音）")
     sp.set_defaults(func=cmd_screenrec)
