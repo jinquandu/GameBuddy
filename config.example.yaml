@@ -60,6 +60,20 @@ folder_watch:
                            # 口径；服务端建组窗口 409 为最终权威）
   stable_min: 10           # 视频静置判稳分钟数（写入中不处理/不计新增）
 
+# ---- 桌面录制（工作台「桌面录制」卡片 / toolbox screenrec）----
+screenrec:
+  fps: 60                 # 采集帧率；系统不支持 Desktop Duplication 时自动回退 30 帧并提示
+  threads: 8              # x264 线程上限（录制内存优化：1440p 约 0.6GB 工作集）
+  segment_min: 15         # 单分P分钟数，到点自动轮转
+  mic: false              # true 时混录麦克风（系统声音始终录）
+  game_processes:         # 「自动录制」监控的游戏进程名（小写子串匹配）
+    - delta_force         # 三角洲行动（对局客户端名不同可在此补）
+    - deltaforce
+  game_process_exclude:   # 排除词：含这些子串的不算「在玩」。启动器
+    - launcher            # delta_force_launcher.exe 不玩游戏也常驻，必须排除，
+    - updater             # 否则会永远判在玩、录制永不停止
+    - helper
+
 # ---- B站直播录制（toolbox record）----
 recorder:
   qn: 10000              # 画质档：10000=原画(1080P)；15000=2K 20000=4K 250=超清。

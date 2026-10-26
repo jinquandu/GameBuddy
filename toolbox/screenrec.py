@@ -42,6 +42,7 @@ import threading
 import time
 from pathlib import Path
 
+from toolbox import proc
 from toolbox.logs import get as _get_log
 
 LOG = _get_log("screenrec")
@@ -63,6 +64,45 @@ def next_part(session_dir: Path, title: str) -> int:
             if m:
                 n = max(n, int(m.group(1)))
     return n + 1
+
+
+DEFAULT_GAME_PROCESSES = ("delta_force", "deltaforce")
+# 三角洲行动进程名(小写子串匹配)。
+DEFAULT_GAME_EXCLUDE = ("launcher", "updater", "helper", "crashpad")
+# **必须排除常驻壳**:2026-10-26 实测本机 delta_force_launcher.exe 在
+# 不玩游戏时也常驻(启动器/WeGame 客户端),若只按 delta_force 子串匹配,
+# 自动录制会永远判"游戏在跑"、永不停止。排除词按子串命中即忽略该行。
+
+
+def game_running(names=None, exclude=None, timeout=8, _run=None):
+    """目标游戏是否在运行(tasklist CSV 子串匹配 + 排除词)。_run 可注入。
+
+    判定:某行进程名含任一 include 且不含任一 exclude → 在运行。
+    用子串而非全名:启动器/客户端/分支进程名跨版本不一致;排除词用来
+    剔除 launcher 这类常驻壳(见上)。"""
+    pats = [str(n).lower() for n in
+            (names if names else DEFAULT_GAME_PROCESSES)]
+    pats = [n for n in pats if n]
+    if not pats:
+        return False
+    exc = [str(n).lower() for n in
+           (exclude if exclude is not None else DEFAULT_GAME_EXCLUDE)]
+    exc = [n for n in exc if n]
+    cmd = ["tasklist", "/FO", "CSV", "/NH"]
+    run = _run or subprocess.run
+    try:
+        r = run(cmd, capture_output=True, timeout=timeout,
+                creationflags=proc.NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    out = (r.stdout or b"").decode("gbk", "replace").lower()
+    for line in out.splitlines():
+        if not any(n in line for n in pats):
+            continue
+        if any(x in line for x in exc):
+            continue                      # 常驻启动器/更新器不算在玩
+        return True
+    return False
 
 
 class ScreenRecorder:
@@ -212,7 +252,8 @@ class ScreenRecorder:
                     ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                      "-nostdin", "-f", "lavfi", "-i", "ddagrab=0:framerate=30",
                      "-frames:v", "1", "-f", "null", "-"],
-                    capture_output=True, timeout=10)
+                    capture_output=True, timeout=10,
+                    creationflags=proc.NO_WINDOW)   # GUI 下探测不闪黑窗
                 self._dda_state = (r.returncode == 0)
             except (OSError, subprocess.TimeoutExpired):
                 self._dda_state = False
@@ -271,9 +312,12 @@ class ScreenRecorder:
             kw.update(stdin=subprocess.PIPE)
         else:
             kw.update(stdin=subprocess.DEVNULL)
-        creationflags = 0
+        # GUI 进程无控制台,子控制台程序会自开新窗口——必须叠加
+        # CREATE_NO_WINDOW(2026-10-26 用户反馈录制闪黑窗);CTRL_BREAK 依赖
+        # CREATE_NEW_PROCESS_GROUP,两者可并存(run_pipeline_subprocess 同法)
+        creationflags = proc.NO_WINDOW
         if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
         p = subprocess.Popen(cmd, creationflags=creationflags, **kw)
         LOG.info("P 启动 %s（audio=%s -t=%.0fs pid=%d）",
                  path.name, audio, dur, p.pid)

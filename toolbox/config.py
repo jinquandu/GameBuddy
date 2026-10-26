@@ -65,6 +65,12 @@ DEFAULTS = {
         # ---- 与 python -m toolbox screenrec 共用）----
         "fps": 60,           # 采集帧率（ddagrab 可达 60；回退 gdigrab 时自动降 30）
         "crf": 23,           # x264 质量（小=清晰大=省空间）
+        "game_processes": ["delta_force", "deltaforce"],
+                           # 自动录制监控的游戏进程名(小写子串匹配,
+                           # 三角洲行动;对局客户端名不同可在此补)
+        "game_process_exclude": ["launcher", "updater", "helper"],
+                           # 排除词:含这些子串的进程不算"在玩"
+                           # (启动器常驻,漏了会导致永不停止录制)
         "threads": 8,        # x264 编码线程上限。内存大头是帧线程缓冲：
                              # 1440p 默认~30线程工作集~1.3GB，8线程~0.6GB，
                              # 实测 CPU 持平（实时录制用不满默认并行度）

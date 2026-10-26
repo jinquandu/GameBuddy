@@ -111,6 +111,68 @@ def main():
 
 
 
+    # ---------- 黑窗修复:NO_WINDOW(用户反馈录制闪命令行窗)
+    class _CapPopen(_FakeProc):
+        last_flags = None
+
+        def __init__(self, cmd, **kw):
+            _CapPopen.last_flags = kw.get("creationflags", 0)
+            super().__init__(cmd, **kw)
+    screenrec.subprocess.Popen = _CapPopen
+    try:
+        r, _ = _rec()
+        r._spawn(Path("x.mp4"), audio=False, dur=60, backend="gdi")
+        import subprocess as _sp2
+        check(_CapPopen.last_flags & _sp2.CREATE_NEW_PROCESS_GROUP != 0
+              and _CapPopen.last_flags & screenrec.proc.NO_WINDOW != 0,
+              "spawn 带 NEW_PROCESS_GROUP|NO_WINDOW(CTRL_BREAK 可用且不闪黑窗)")
+    finally:
+        screenrec.subprocess.Popen = _FakeProc
+
+    flags_seen = {}
+    import subprocess as _sp3
+
+    def _cap_run(*a, **k):
+        flags_seen["f"] = k.get("creationflags", 0)
+        class _R: returncode = 0; stdout = b""; stderr = b""
+        return _R()
+    r, _ = _rec()
+    r._dda_state = None
+    orig = screenrec.subprocess.run
+    screenrec.subprocess.run = _cap_run
+    try:
+        r._dda_probe()
+    finally:
+        screenrec.subprocess.run = orig
+    check(flags_seen.get("f", 0) & screenrec.proc.NO_WINDOW != 0,
+          "dda 探测同样带 NO_WINDOW")
+
+    # ---------- 游戏进程探测(自动录制的监控源)
+    class _R2: pass
+
+    def _mk_run(out: bytes):
+        def run(*a, **k):
+            rr = _R2(); rr.stdout = out; rr.returncode = 0
+            return rr
+        return run
+    gr = screenrec.game_running
+    check(gr(_run=_mk_run(b'"delta_force_launcher.exe","1234"')) is False,
+          "game_running:启动器常驻不算在玩(排除词)")
+    check(gr(_run=_mk_run(b'"DeltaForceClient-Win64-Shipping.exe","1"')) is True,
+          "game_running:对局客户端算在玩")
+    check(gr(["delta_force"], ["launcher"],
+             _run=_mk_run(b'"delta_force_launcher.exe","1"')) is False,
+          "game_running:排除词可配置")
+    check(gr(["delta_force"], [],
+             _run=_mk_run(b'"delta_force_launcher.exe","1"')) is True,
+          "game_running:排除表置空则该行照常命中(策略可控)")
+    check(gr(_run=_mk_run(b'"chrome.exe","1"')) is False,
+          "game_running:无关进程不命中")
+    check(gr(["xyzgame"], _run=_mk_run(b'"XyzGameClient.exe","9"')) is True,
+          "game_running:自定义名子串命中(大小写不敏感)")
+    check(gr([], _run=_mk_run(b'"delta_force.exe"')) is True,
+          "game_running:空名单回退默认(配置清空不致监控失效)")
+
     # ---------- 探测缓存（只真探一次）
     import subprocess as _sp
     calls = {"n": 0}

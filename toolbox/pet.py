@@ -314,6 +314,8 @@ class PetWindow(tk.Tk):
         self.daily_thread = None
         self._rec = None            # 桌面录制器（None=未在录）
         self._rec_stopping = False
+        self._rec_auto_on = False   # 自动录制开关(游戏启停联动)
+        self._auto_wake = threading.Event()   # 开关立即响应(免等轮询拍)
         self._status_text = ""
         self._status_sticky = False
         self._page_key = "home"
@@ -331,6 +333,12 @@ class PetWindow(tk.Tk):
         self.geometry(f"{dpi.px(W)}x{dpi.px(600)}")
         self._place_bottom_right()
         self.bind("<Unmap>", self._on_unmap)
+        hist = self._load_hist()
+        if hist.get("auto_record"):
+            self.rec_auto_var.set(True)
+            self._rec_auto_on = True
+            self._rec_render()
+            self.after(600, self._rec_watch_start)
         self._legacy_cleanup()
         self._acct_refresh()
         self._prod_refresh()
@@ -451,6 +459,7 @@ class PetWindow(tk.Tk):
         self._build_works(self._pages["works"].inner)
         self._build_settings(self._pages["settings"].inner)
         self._nav("home")
+        self._rec_render()
 
     def _build_home(self, home):
         b1 = ui_kit.card(home, "录像文件夹")
@@ -478,12 +487,17 @@ class PetWindow(tk.Tk):
         self.rec_lab.pack(side="left", fill="x", expand=True)
         self.rec_pause_btn = ui_kit.button(rec_row, "暂停", self._rec_pause,
                                            kind="ghost")
-        self.rec_btn = ui_kit.button(rec_row, "开始录制", self._rec_toggle,
-                                     kind="brand")
-        self.rec_btn.pack(side="right")
+        # 用户指示(2026-10-26):取消「开始录制」手动钮,改「自动录制」开关
+        # ——开着就监控三角洲行动:游戏启动自动录,退出自动收尾排队
+        self.rec_auto_var = tk.BooleanVar(value=False)
+        self.rec_auto_chk = ui_kit.checkbutton(
+            rec_row, "自动录制", self.rec_auto_var,
+            command=self._rec_auto_toggle)
+        self.rec_auto_chk.pack(side="right")
         self.rec_note = tk.Label(br,
-                                 text="录到上面的录像文件夹里，每天一个"
-                                      "新文件夹，整个文件夹算一个任务",
+                                 text="开着自动录制：进三角洲行动就自动录，"
+                                      "退游戏自动收尾，录完整个文件夹自动"
+                                      "排队剪辑",
                                  bg=BRAND["card"], fg=BRAND["dim"],
                                  font=F_SMALL, anchor="w",
                                  wraplength=dpi.px(430), justify="left")
@@ -654,13 +668,16 @@ class PetWindow(tk.Tk):
             d = json.loads(HIST.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             d = {}
-        return {"watch_dir": d.get("watch_dir", "")}
+        return {"watch_dir": d.get("watch_dir", ""),
+                "auto_record": bool(d.get("auto_record"))}
 
     def _save_hist(self):
         HIST.parent.mkdir(parents=True, exist_ok=True)
-        HIST.write_text(json.dumps({"watch_dir": self.watch_dir},
-                                   ensure_ascii=False, indent=1),
-                        encoding="utf-8")
+        HIST.write_text(json.dumps(
+            {"watch_dir": self.watch_dir,
+             "auto_record": self.rec_auto_var.get()
+             if hasattr(self, "rec_auto_var") else self._rec_auto_on},
+            ensure_ascii=False, indent=1), encoding="utf-8")
 
     def _load_last_works(self):
         try:
@@ -1401,12 +1418,66 @@ class PetWindow(tk.Tk):
 
     # ---------- 桌面录制 ----------
 
-    def _rec_toggle(self):
-        if self._rec is None:
-            self._rec_start()
+    REC_WATCH_S = 10          # 游戏进程轮询周期
+    REC_MISS_N = 3            # 连续 N 拍不见游戏才停(防启动器切换抖动)
+
+    def _rec_auto_toggle(self):
+        """「自动录制」开关:开=起监控线程(游戏在则立即录);关=停录+停监控。"""
+        on = self.rec_auto_var.get()
+        self._rec_auto_on = on
+        hist = self._load_hist()
+        hist["auto_record"] = on
+        try:
+            import json as _json
+            HIST.parent.mkdir(parents=True, exist_ok=True)
+            HIST.write_text(_json.dumps(hist, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+        except OSError:
+            pass
+        if on:
+            self._flash("自动录制已开启：进三角洲行动就自动录", BRAND["primary"])
+            self._rec_render()          # 立即显示「等待三角洲行动启动」
+            self._rec_watch_start()
+        else:
+            self._auto_wake.set()          # 唤醒线程退出
+            if self._rec is not None and not self._rec_stopping:
+                self._rec_stop()
+            self._rec_render()
+            self._flash("自动录制已关闭", BRAND["dim"])
+
+    def _rec_watch_start(self):
+        """游戏监控线程:游戏启动→录;退出(连续 N 拍)→停录。幂等。"""
+        if getattr(self, "_rec_watch_on", False):
+            self._auto_wake.set()           # 已有线程:先唤醒(新拍即刻生效)
             return
-        if not self._rec_stopping:
-            self._rec_stop()
+        self._rec_watch_on = True
+        _scr_cfg = load_config().get("screenrec") or {}
+        names = _scr_cfg.get("game_processes") or ["delta_force", "deltaforce"]
+        exclude = _scr_cfg.get("game_process_exclude")
+
+        def loop():
+            from toolbox.screenrec import game_running
+            miss = 0
+            while self._rec_auto_on and not self.daily_stop.is_set():
+                try:
+                    running = game_running(names, exclude)
+                except Exception:           # noqa: BLE001 探测失败按未运行
+                    running = False
+                if running:
+                    miss = 0
+                    if self._rec is None and not self._rec_stopping:
+                        self.after(0, self._rec_start)
+                else:
+                    miss += 1
+                    if miss >= self.REC_MISS_N and self._rec is not None \
+                            and not self._rec_stopping:
+                        miss = 0
+                        self.after(0, self._rec_stop)
+                self._auto_wake.wait(self.REC_WATCH_S)
+                self._auto_wake.clear()
+            self._rec_watch_on = False
+        threading.Thread(target=loop, daemon=True,
+                         name="rec-game-watch").start()
 
     def _rec_start(self):
         wdir = (self.watch_dir
@@ -1420,8 +1491,7 @@ class PetWindow(tk.Tk):
         self._rec = ScreenRecorder(Path(wdir), cfg,
                                    on_event=self._rec_event_bg)
         self._rec.start()
-        self.rec_btn.config(text="结束录制", state="normal")
-        self.rec_lab.config(text="启动中…")
+        self.rec_lab.config(text="启动中…", fg=BRAND["fg"])
         self._flash("录制已开始，保存到录像文件夹（每天一个子文件夹）",
                     BRAND["primary"])
         self.after(1000, self._rec_tick)
@@ -1431,20 +1501,27 @@ class PetWindow(tk.Tk):
         if rec is None:
             return
         self._rec_stopping = True
-        self.rec_btn.config(state="disabled")
-        self.rec_lab.config(text="收尾中…（正在写完当前文件）")
+        self.rec_auto_chk.configure(state="disabled")
+        self.rec_lab.config(text="收尾中…（正在写完当前文件）",
+                            fg=BRAND["dim"])
         self.rec_pause_btn.pack_forget()
 
         def fin():
             try:
-                rec.stop(timeout=40)      # stop 事件回来后复位 UI
+                files = rec.stop(timeout=40)
             except Exception as e:        # noqa: BLE001
                 LOG.warning("停录异常：%s", e)
-                try:
-                    self.after(0, self._rec_event, "stop",
-                               {"secs": rec.elapsed(), "files": []})
-                except Exception:         # noqa: BLE001 窗口已销毁
-                    pass
+                files = []
+            # 兜底:正常路径由录制器发 stop 事件复位 UI;若录制器异常退出
+            # 没发事件,这里强制复位——否则界面永远卡在「收尾中…」
+            def fallback():
+                if self._rec is rec:
+                    self._rec_event("stop", {"secs": rec.elapsed(),
+                                             "files": files or []})
+            try:
+                self.after(1500, fallback)
+            except Exception:             # noqa: BLE001 窗口已销毁
+                pass
         threading.Thread(target=fin, daemon=True).start()
 
     def _rec_pause(self):
@@ -1476,7 +1553,7 @@ class PetWindow(tk.Tk):
         files = payload.get("files", [])
         self._rec = None
         self._rec_stopping = False
-        self.rec_btn.config(text="开始录制", state="normal")
+        self.rec_auto_chk.configure(state="normal")
         self._rec_render()
         self.rec_note.config(
             text=f"已录 {self._fmt_secs(secs)} · {len(files)} 个分P，"
@@ -1506,13 +1583,17 @@ class PetWindow(tk.Tk):
     def _rec_render(self):
         rec = self._rec
         if rec is None:
-            self.rec_lab.config(text="未在录制")
-            self.rec_btn.config(text="开始录制", state="normal")
+            if self._rec_auto_on:
+                self.rec_lab.config(text="等待三角洲行动启动…",
+                                    fg=BRAND["dim"])
+            else:
+                self.rec_lab.config(text="自动录制未开启", fg=BRAND["dim"])
             self.rec_pause_btn.pack_forget()
             self.rec_note.config(
-                text="录到上面的录像文件夹里，每天一个新文件夹，"
-                     "整个文件夹算一个任务")
+                text="开着自动录制：进三角洲行动就自动录，退游戏自动收尾，"
+                     "录完整个文件夹自动排队剪辑")
             return
+        self.rec_lab.config(fg=BRAND["fg"])
         if rec.paused:
             self.rec_lab.config(
                 text=f"已暂停 · 已录 {self._fmt_secs(rec.elapsed())}")
@@ -1523,7 +1604,7 @@ class PetWindow(tk.Tk):
                      f" · {self._fmt_secs(rec.elapsed())}")
             self.rec_pause_btn.config(text="暂停")
         self.rec_pause_btn.pack(side="right", padx=(0, dpi.px(8)),
-                                before=self.rec_btn)
+                                before=self.rec_auto_chk)
 
     @staticmethod
     def _fmt_secs(s):
@@ -2043,6 +2124,8 @@ class PetWindow(tk.Tk):
         step()
 
     def _on_close(self):
+        self._rec_auto_on = False          # 先停游戏监控
+        self._auto_wake.set()
         if self._rec is not None:          # 退出前先收尾录制（写完 moov）
             try:
                 self._rec.stop(timeout=25)

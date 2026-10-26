@@ -50,6 +50,19 @@ except Exception:
     _petmod.PetWindow._env_auto = _real_env_auto
     raise
 
+check("录制卡片=自动录制开关(无开始按钮)",
+      hasattr(win, "rec_auto_chk") and hasattr(win, "rec_auto_var")
+      and not hasattr(win, "rec_btn"))
+check("录制初始态=自动录制未开启",
+      "自动录制未开启" in win.rec_lab.cget("text")
+      and win.rec_auto_var.get() is False)
+win.rec_auto_var.set(True)
+win._rec_auto_on = True
+win._rec_render(); win.update()
+check("自动录制开+未在录=等待游戏",
+      "等待三角洲行动" in win.rec_lab.cget("text"))
+win.rec_auto_var.set(False); win._rec_auto_on = False
+win._rec_render()
 check("左导航三页齐", set(win._pages) == {"home", "works", "settings"}
       and all(win._nav_btns[k].winfo_ismapped() for k in win._nav_btns))
 check("新手教程入口已移除（REQ-20261022-005 替换为环境检测）",
