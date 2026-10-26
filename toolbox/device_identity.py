@@ -21,7 +21,8 @@ from pathlib import Path
 
 from toolbox.config import DATA
 
-DEVICE_DIR = DATA / ".device"
+DEVICE_DIR = Path(  # 可用环境变量 DSJ_DEVICE_DIR 重定向(多实例/联调;
+    os.environ.get("DSJ_DEVICE_DIR") or (DATA / ".device"))
 KEY_FILE = DEVICE_DIR / "pc-device-v1.dpapi"
 SESSION_FILE = DEVICE_DIR / "session.json"      # DPAPI 包裹的账号会话
 REVOKE_FILE = DEVICE_DIR / "session_revoked"    # 服务端吊销留痕(仅码/时间)
