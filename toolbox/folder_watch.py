@@ -57,7 +57,17 @@ SCAN_DEPTH = 3        # 监控根下递归深度上限（REQ-20261021-004）：�
 
 
 def _cfg():
-    return (load_config().get("folder_watch") or {})
+    """folder_watch 生效配置:内置默认 < config.yaml < 服务端下发规则
+    (REQ-20261026-001 规则2——rules_sync 定时拉取并缓存,服务端最高)。"""
+    cfg = dict(load_config().get("folder_watch") or {})
+    try:
+        from toolbox import rules_sync
+        over = rules_sync.applied_overrides()
+        if over:
+            cfg.update(over)
+    except Exception:                          # noqa: BLE001 规则层失败用本地
+        pass
+    return cfg
 
 
 def _now():
@@ -212,6 +222,14 @@ def scan(watch_dir, state=None):
             old["state"] = "queued"        # done/failed+新内容 → 重新排队
             old["attempts"] = 0
             return
+        # 散装文件已被父目录任务聚合过(_merge_dir_tasks 之后)→ 不再按
+        # 文件另立任务(否则每次扫描重演「入队 N 个→下次又聚合回 1 个」,
+        # 2026-10-26 排障发现日志每 2h 刷「扫描入队 11 个新目标」即此)
+        if target.is_file():
+            parent_dir = str(target.parent)
+            if any(j.get("path") == parent_dir
+                   for j in state["jobs"].values()):
+                return
         state["jobs"][key] = {
             "key": key, "path": str(target),
             "session": target.stem if target.is_file() else target.name,
@@ -314,6 +332,12 @@ def finish(key, ok, note="", state=None):
     j.pop("taken_ts", None)
     if ok:
         j["state"], j["note"] = "done", note
+        # 记录「按哪份内容处理完的」(REQ-20261026-001):目录内容后续再变,
+        # 当前指纹 != done_key → 重新计入未处理;旧任务无此键则回退比 key。
+        try:
+            j["done_key"] = job_key(Path(j.get("path", "")))
+        except OSError:
+            pass
     elif j["attempts"] >= amax:
         j["state"], j["note"] = "failed", note
     else:
@@ -605,6 +629,61 @@ def mark_daily_run():
 # 规则 5「无新录像不生产、当日权益照算」：阈值不足=生产时刻照常消耗。
 
 PRODUCTION_WINDOW_S = 86400          # 滚动生产窗口（与服务端建组窗口同口径）
+
+
+def _target_covered(target, state):
+    """目标是否「已处理过」(REQ-20261026-001 规则1):同路径存在 done 任务,
+    且处理时内容指纹(done_key,旧任务回退 key)与当前一致。内容变了、
+    在队列/失败、从未入队 → 都算未处理。"""
+    try:
+        cur = job_key(target)
+    except OSError:
+        return True                       # 取不到键(目标消失):不计入
+    tp = str(target)
+    for j in state["jobs"].values():
+        if j.get("path") != tp:
+            continue
+        if j.get("state") != "done":
+            return False                  # 同路径任务还在等/失败 → 未处理
+        dk = j.get("done_key") or j.get("key")
+        return dk == cur                  # done 且指纹一致 → 已处理
+    return False                          # 从未入队 → 未处理
+
+
+def unprocessed_bytes(watch_dir, cfg=None, state=None):
+    """未处理录像总字节(REQ-20261026-001 规则1,替代 mtime 24h 窗口口径)。
+
+    目标归属与 scan 同口径:根直下散装视频归为一个根目标(与目录任务聚合
+    一致);子目录视频归其所在目录。只计「稳定」目标(写入中的不算,防止
+    触发生产后文件仍在涨)。老素材只要没处理过就计入——修复「队列躺着
+    永远不触发」(旧口径只看 mtime 近 24h,老录像新增恒为 0)。"""
+    cfg = cfg if cfg is not None else _cfg()
+    state = state if state is not None else _load()
+    stable_sec = int(cfg.get("stable_min", 10)) * 60
+    wd = Path(watch_dir)
+    if not wd.is_dir():
+        return 0.0
+    groups = {}                           # 目标 -> [视频]
+    for v in _videos_in(wd):
+        tgt = v.parent if v.parent != wd else wd
+        groups.setdefault(tgt, []).append(v)
+    now = time.time()
+    total = 0.0
+    for tgt, vids in groups.items():
+        try:
+            # 判稳只看本组成员(不用 _stable 整目录递归——根散装组会被
+            # 子目录里写入中的文件连坐);非空同 scan 口径
+            stable = all(v.stat().st_size > 0
+                         and now - v.stat().st_mtime >= stable_sec
+                         for v in vids)
+            if not stable:
+                continue
+            if _target_covered(tgt, state):
+                continue
+            total += sum(v.stat().st_size for v in vids)
+        except OSError:
+            continue
+    return total
 
 
 def threshold_bytes(cfg=None):

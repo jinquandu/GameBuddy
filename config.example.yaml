@@ -18,6 +18,10 @@ server:
   #    tenant 由服务端从 token 解出（下面的 tenant/ssh_alias 均不参与）。
   #    两项都配好才生效；upload_url 非空而 upload_token 缺失会直接报错（不回退 SSH）。
   upload_url: https://95188.pw/api/production/v1
+  # rules_url: ""          # 客户端规则下发源（REQ-20261026-001）。留空=从
+                           # upload_url 的 origin 推导（/eval/clients/client-rules.json）。
+                           # 规则只含非安全参数（阈值/节拍等，白名单+夹紧），
+                           # 每 6h 对齐一次；失败沿用缓存/内置默认
   upload_token: ""            # 可选。留空=账号模式（登录会话+DSJ-PC-1 签名，
                               # 服务端 INT-1 核验解租户，客户机零配置 token，
                               # 需先在桌宠登录）；填了则用 1.3.0 租户 token
@@ -48,8 +52,10 @@ folder_watch:
   scan_interval_min: 120   # 扫描节拍（分钟）：稳定录像入队待产（扫描≠生产）
   daily_hour: 4            # 生产时刻（0-23，北京时间口径）：触发当日生产判定；
                            # 开机时 24h 未生产则启动即补跑（条件不豁免）
-  threshold_gb: 2          # 触发阈值：近 24h 新增录像总字节严格>该值（十进制
-                           # GB）才生产；不足/无新录像不生产、当日权益照算
+  threshold_gb: 2          # 触发阈值：待处理录像总字节严格>该值（十进制 GB）
+                           # 才生产——「待处理」=没处理过的都算（新录像、排队/
+                           # 失败的、处理完又更新的），不看文件新旧；不足则本轮
+                           # 不生产、当日权益照算。该键可被服务端规则覆盖
   production_window_s: 86400  # 滚动生产窗口（秒）：窗口内只触发一次（客户端
                            # 口径；服务端建组窗口 409 为最终权威）
   stable_min: 10           # 视频静置判稳分钟数（写入中不处理/不计新增）

@@ -7,7 +7,7 @@ Demo（用户拍板「UI 以全流程 Demo 为准」）；IDEA-006 新规则（�
 稿的配色语言（紫/粉）、不采立绘头像装饰。
 
 前台无手动跑链 / BV / URL / 监控行（稿已确认边界）：生产由后台日任务
-按规则驱动（每 2h 扫描入队 + 04:00/开机补跑触发 + 近 24h 新增>2GB，
+按规则驱动（每 2h 扫描入队 + 04:00/开机补跑触发 + 未处理录像>2GB，
 滚动 24h 一组）；内部联调走 CLI `toolbox pipeline`。三选一在作品页
 （通知服务 portal）完成，PC 端只做真实状态 + 入口（不以稿代验：
 候选列表/发布接口契约后置 C2S-15 起另行起草）。
@@ -326,6 +326,7 @@ class PetWindow(tk.Tk):
         self._acct_refresh()
         self._prod_refresh()
         self._daily_start()
+        self._rules_start()               # 规则定时对齐(REQ-20261026-001)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(15_000, self._queue_tick)
         self.after(2500, self._dev_snapshot)
@@ -1012,7 +1013,7 @@ class PetWindow(tk.Tk):
                     out["jobs"] = fw.jobs_view()
                     out["last_ts"] = fw.last_production_ts()
                     out["due"] = fw.production_due(boot=False)
-                    out["added"] = fw.new_recordings_bytes(wdir)
+                    out["added"] = fw.unprocessed_bytes(wdir)
                     out["limit"] = fw.threshold_bytes()
                     out["next_scan_ts"] = fw.next_scan_ts()
                     out["progress"] = fw.running_progress()
@@ -1106,9 +1107,9 @@ class PetWindow(tk.Tk):
             gb = prod["added"] / 1e9
             hit = prod["added"] > prod.get("limit", 2e9)
             badge = "已达标，等自动剪辑" if hit else "录像还不够"
-            detail = (f"最近一天新增录像 {gb:.2f}GB"
+            detail = (f"待处理录像 {gb:.2f}GB（没处理过的都算）"
                       + ("，够了！到点自动开始剪辑" if hit
-                         else "，再录一点吧（要超过 2GB 才开始剪）"))
+                         else "，再攒一点（要超过 2GB 才开始剪）"))
             due = prod.get("due") or (False, "")
             if not hit and due[1]:
                 detail += f"（{due[1]}）"
@@ -1161,7 +1162,7 @@ class PetWindow(tk.Tk):
             self.works_empty, "还没有真实成片",
             ("先在工作台选好录像文件夹，之后每天会自动为你剪出候选"
              if not prod.get("wdir") else
-             "录像足够后（近 24 小时新增超过 2GB）会自动开始剪辑；"
+             "录像攒够 2GB（没处理过的都算）会自动开始剪辑；"
              "剪好之前这里不会有内容"))
         box.pack(fill="x", pady=dpi.px(4))
         self.works_empty.pack(fill="x")
@@ -1286,6 +1287,12 @@ class PetWindow(tk.Tk):
 
     def _copy_diag(self):
         from toolbox import diagnostics
+        from toolbox import rules_sync
+        rules_meta = rules_sync.applied_meta()
+        rules_line = ("规则版本：内置默认（未拉取到服务端规则）"
+                      if not rules_meta else
+                      "规则版本：v" + str(rules_meta.get("rules_version", "?"))
+                      + "（" + str(rules_meta.get("applied_at", "")) + " 对齐）")
         try:
             text = diagnostics.build(
                 version.label(), sess=self._sess, pre=self._pre,
@@ -1297,7 +1304,8 @@ class PetWindow(tk.Tk):
                     (f"登录状态：{self._pre.get('auth_error')} "
                      f"{self._pre.get('auth_message', '')}"
                      if self._pre.get("auth_error") else "登录状态：正常"),
-                    f"本地云端记录 {len(self._produce)} 条"])
+                    f"本地云端记录 {len(self._produce)} 条",
+                    rules_line])
             path = diagnostics.save(text)
             self.clipboard_clear()
             self.clipboard_append(text)
@@ -1338,6 +1346,28 @@ class PetWindow(tk.Tk):
 
     # ---------- 后台日任务 ----------
 
+    RULES_POLL_S = 6 * 3600
+
+    def _rules_start(self):
+        """规则服务端对齐(REQ-20261026-001 规则2):首启 30s 拉一次,
+        之后每 6h 一次;失败沿用缓存/内置默认,永不阻塞。规则只含非安全
+        参数(阈值/节拍等),经白名单+夹紧,登录/绑定等安全门不在此列。"""
+        def loop():
+            import toolbox.rules_sync as rs
+            if self.daily_stop.wait(30):
+                return
+            try:
+                rs.poll_once()
+            except Exception as e:              # noqa: BLE001
+                LOG.info("规则对齐跳过:%s", e)
+            while not self.daily_stop.wait(rs.POLL_S):
+                try:
+                    rs.poll_once()
+                except Exception:               # noqa: BLE001
+                    pass
+        threading.Thread(target=loop, daemon=True,
+                         name="rules-sync").start()
+
     def _daily_start(self):
         if self.daily_thread and self.daily_thread.is_alive():
             return
@@ -1352,8 +1382,8 @@ class PetWindow(tk.Tk):
         hour = int(cfg.get("daily_hour", 4))
         scan_min = int(cfg.get("scan_interval_min", 120))
         LOG.info("后台日任务就绪（每 %d 分钟扫描入队；生产=每日 %02d:00 "
-                 "或开机补跑，滚动 24h 一次，近 24h 新增>%.0fGB 触发；"
-                 "未配置目录则等待选择）",
+                 "或开机补跑，滚动 24h 一次，待处理录像>%.0fGB 触发"
+                 "（没处理过的都算）；未配置目录则等待选择）",
                  scan_min, hour, float(cfg.get("threshold_gb", 2)))
         boot = {"done": False}
         next_scan = 0.0
@@ -1382,11 +1412,12 @@ class PetWindow(tk.Tk):
                         self.after(0, lambda g=gate: self._flash(
                             f"生产前置未满足：{g}", BRAND["warn"]))
                     else:
-                        added = fw.new_recordings_bytes(wdir)
+                        added = fw.unprocessed_bytes(wdir)
                         limit = fw.threshold_bytes()
                         if added > limit:
-                            LOG.info("生产开始（%s）：近 24h 新增 %.2fGB > "
-                                     "%.0fGB", why, added / 1e9, limit / 1e9)
+                            LOG.info("生产开始（%s）：待处理录像 %.2fGB > "
+                                     "%.0fGB（未处理都算）", why, added / 1e9,
+                                     limit / 1e9)
                             self.after(0, lambda: self._tray_tip("生产中"))
                             try:
                                 n_ok, n_fail = self._daily_pass(wdir)
@@ -1401,9 +1432,9 @@ class PetWindow(tk.Tk):
                             except Exception as e:  # noqa: BLE001
                                 LOG.warning("生产失败：%s", e)
                         else:
-                            LOG.info("生产跳过（%s）：近 24h 新增 %.2fGB ≤ "
-                                     "%.0fGB，当日权益照算", why, added / 1e9,
-                                     limit / 1e9)
+                            LOG.info("生产跳过（%s）：待处理录像 %.2fGB ≤ "
+                                     "%.0fGB（未处理都算），当日权益照算", why,
+                                     added / 1e9, limit / 1e9)
                         fw.mark_production_run()
                     self.after(0, self._prod_refresh)
             self.daily_stop.wait(timeout=600)
