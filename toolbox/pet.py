@@ -1661,13 +1661,6 @@ class PetWindow(tk.Tk):
         threading.Thread(target=loop, daemon=True,
                          name="auto-update").start()
 
-    def _ui(self, fn):
-        """后台线程 → 主线程;窗口已关时静默。"""
-        try:
-            self.after(0, fn)
-        except (tk.TclError, RuntimeError):
-            pass
-
     def _producing_now(self):
         return bool((self._prod.get("summary") or {}).get("running")) or \
             bool(self._prod.get("progress"))
@@ -1856,7 +1849,7 @@ class PetWindow(tk.Tk):
                     gate = self._bind_gate()
                     if gate:
                         LOG.warning("生产暂缓：%s", gate)
-                        self.after(0, lambda g=gate: self._flash(
+                        self._ui(lambda g=gate: self._flash(
                             f"生产前置未满足：{g}", BRAND["warn"]))
                     else:
                         added = fw.unprocessed_bytes(wdir)
@@ -1865,17 +1858,17 @@ class PetWindow(tk.Tk):
                             LOG.info("生产开始（%s）：待处理录像 %.2fGB > "
                                      "%.0fGB（未处理都算）", why, added / 1e9,
                                      limit / 1e9)
-                            self.after(0, lambda: self._tray_tip("生产中"))
+                            self._ui(lambda: self._tray_tip("生产中"))
                             try:
                                 n_ok, n_fail = self._daily_pass(wdir)
                                 LOG.info("生产完成：成功 %d / 失败 %d",
                                          n_ok, n_fail)
                                 if n_ok or n_fail:
-                                    self.after(0, lambda ok=n_ok, fl=n_fail:
-                                               self._flash(
-                                                   f"本机处理完成：成功{ok} "
-                                                   f"失败{fl}", BRAND["warn"]
-                                                   if fl else BRAND["dim"]))
+                                    self._ui(lambda ok=n_ok, fl=n_fail:
+                                             self._flash(
+                                                 f"本机处理完成：成功{ok} "
+                                                 f"失败{fl}", BRAND["warn"]
+                                                 if fl else BRAND["dim"]))
                             except Exception as e:  # noqa: BLE001
                                 LOG.warning("生产失败：%s", e)
                         else:
@@ -1883,8 +1876,20 @@ class PetWindow(tk.Tk):
                                      "%.0fGB（未处理都算），当日权益照算", why,
                                      added / 1e9, limit / 1e9)
                         fw.mark_production_run()
-                    self.after(0, self._prod_refresh)
+                    self._ui(self._prod_refresh)
             self.daily_stop.wait(timeout=600)
+
+    def _ui(self, fn):
+        """后台线程 → 主线程;窗口已关(mainloop 退出)时静默丢弃。
+
+        日任务/录制/更新等常驻线程在窗口关闭瞬间仍可能执行到回调,
+        Tk 会抛 RuntimeError("main thread is not in main loop")并打印
+        线程栈(测试 teardown 与实机关窗都会污染日志)。此处统一吞掉。
+        """
+        try:
+            self.after(0, fn)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _bind_gate(self):
         api, prod = self._acct_cfg()
