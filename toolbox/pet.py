@@ -17,6 +17,7 @@ watch_pipeline_log 消费），主窗不再驱动手动跑链。
 """
 import json
 import os
+import sys
 import re
 import threading
 import time
@@ -275,6 +276,12 @@ def latest_stats():
     return out
 
 
+def _abs_url(info):
+    """清单里的包 url(可能相对)→ 绝对地址(按清单候选 origin 拼)。"""
+    import toolbox.auto_update as au
+    return au._abs(info.get("pkg_url") or "", au.manifest_urls())
+
+
 class PetWindow(tk.Tk):
     """主窗(REQ-20261022-006/007/008/010 改版)。
 
@@ -327,6 +334,11 @@ class PetWindow(tk.Tk):
         self._prod_refresh()
         self._daily_start()
         self._rules_start()               # 规则定时对齐(REQ-20261026-001)
+        self._upd_phase = "idle"          # idle/checking/downloading/
+                                          # deferred/ready/none/disabled
+        self._upd_info = {}               # 清单摘要(版本/说明/required)
+        self._update_restore_ready()      # 上次已就绪的重启后仍可应用
+        self._update_start()              # 自动更新(REQ-20261026-002)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(15_000, self._queue_tick)
         self.after(2500, self._dev_snapshot)
@@ -516,6 +528,19 @@ class PetWindow(tk.Tk):
                                 fg=BRAND["faint"], font=F_SMALL, anchor="e")
         self.ver_lab.pack(side="right")
         self.ver_lab.config(text=f"v{version.VERSION}（{version.BUILD}）")
+        # 更新行(REQ-20261026-002):检查更新 + 就绪后的「重启并更新」
+        row1c = tk.Frame(s1, bg=BRAND["card"])
+        row1c.pack(fill="x", pady=(dpi.px(6), 0))
+        self.upd_btn = ui_kit.button(row1c, "检查更新", self._update_now,
+                                     kind="ghost")
+        self.upd_btn.pack(side="left")
+        self.upd_restart = ui_kit.button(row1c, "重启并更新", None,
+                                         kind="cta")
+        self.upd_restart.pack_forget()
+        self.upd_lab = tk.Label(s1, text="", bg=BRAND["card"],
+                                fg=BRAND["dim"], font=F_SMALL, anchor="w",
+                                wraplength=dpi.px(430), justify="left")
+        self.upd_lab.pack(fill="x", pady=(dpi.px(4), 0))
 
         s2 = ui_kit.card(st, "开始剪辑的条件")
         pre_row = tk.Frame(s2, bg=BRAND["card"])
@@ -1289,6 +1314,13 @@ class PetWindow(tk.Tk):
         from toolbox import diagnostics
         from toolbox import rules_sync
         rules_meta = rules_sync.applied_meta()
+        upd = self._upd_info or {}
+        upd_line = ("更新：当前 v" + version.VERSION
+                    + ("；新版本 v" + str((upd.get("latest") or {}).get(
+                        "version", "?")) + " 已就绪待重启"
+                       if self._upd_phase == "ready" else
+                       "；无可用更新" if self._upd_phase in ("none", "disabled")
+                       else "；状态 " + str(self._upd_phase)))
         rules_line = ("规则版本：内置默认（未拉取到服务端规则）"
                       if not rules_meta else
                       "规则版本：v" + str(rules_meta.get("rules_version", "?"))
@@ -1305,7 +1337,8 @@ class PetWindow(tk.Tk):
                      f"{self._pre.get('auth_message', '')}"
                      if self._pre.get("auth_error") else "登录状态：正常"),
                     f"本地云端记录 {len(self._produce)} 条",
-                    rules_line])
+                    rules_line,
+                    upd_line])
             path = diagnostics.save(text)
             self.clipboard_clear()
             self.clipboard_append(text)
@@ -1367,6 +1400,185 @@ class PetWindow(tk.Tk):
                     pass
         threading.Thread(target=loop, daemon=True,
                          name="rules-sync").start()
+
+    # ---------- 自动更新(REQ-20261026-002) ----------
+    #
+    # 后台线程:首启 60s 查一次,之后每 6h;发现新版→让路剪辑下载→
+    # 校验+staged→「新版本已就绪」。**绝不自动重启**:重启入口只在用户
+    # 点「重启并更新」时出现;剪辑/上传进行中既不下载也不催促。
+    # 清单必须过 Ed25519 验签(update_signing),失败沿用当前版本留痕。
+
+    UPDATE_POLL_S = 6 * 3600
+
+    def _update_start(self):
+        def loop():
+            if not self.daily_stop.wait(60):
+                self._update_cycle(manual=False)
+            while not self.daily_stop.wait(self.UPDATE_POLL_S):
+                self._update_cycle(manual=False)
+                # 有新版但让路中(剪辑占线/磁盘不足)→ 10 分钟粒度重试
+                tries = 0
+                while (self._upd_phase == "deferred"
+                       and tries < 35
+                       and not self.daily_stop.wait(600)):
+                    self._update_cycle(manual=False)
+                    tries += 1
+        threading.Thread(target=loop, daemon=True,
+                         name="auto-update").start()
+
+    def _ui(self, fn):
+        """后台线程 → 主线程;窗口已关时静默。"""
+        try:
+            self.after(0, fn)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _producing_now(self):
+        return bool((self._prod.get("summary") or {}).get("running")) or \
+            bool(self._prod.get("progress"))
+
+    def _update_cycle(self, manual=False):
+        import toolbox.auto_update as au
+        if self._upd_phase in ("ready", "downloading"):
+            return
+        try:
+            info = au.check()
+        except Exception as e:                  # noqa: BLE001
+            LOG.warning("更新检查异常:%s", e)
+            info = {"unavailable": True}
+        if info.get("unavailable") or info.get("invalid"):
+            self._upd_phase = "none"
+            why = "清单验签失败，已忽略" if info.get("invalid") else "暂不可达"
+            self._ui(lambda m=manual, w=why: self._upd_render(
+                f"检查更新：{w}（沿用当前版本）", warn=not m))
+            return
+        if info.get("disabled"):
+            self._upd_phase = "disabled"
+            self._ui(lambda: self._upd_render("更新通道已停用"))
+            return
+        if not info.get("newer"):
+            self._upd_phase = "none"
+            if manual:
+                self._ui(lambda: self._upd_render(
+                    f"已是最新版本（v{version.VERSION}）"))
+            else:
+                self._ui(lambda: self._upd_render(""))
+            return
+        latest = info.get("latest") or {}
+        self._upd_info = info
+        build = str(latest.get("build") or "")
+        note = str(latest.get("notes") or "")[:80]
+        head = (f"发现新版本 v{latest.get('version')}（{build}）"
+                + ("【建议尽快升级】" if info.get("required") else ""))
+        if self._producing_now():
+            self._upd_phase = "deferred"
+            self._ui(lambda h=head: self._upd_render(
+                h + "：正在剪辑，完成后自动下载", warn=True))
+            return
+        if not au.disk_ok(int(info.get("size") or 0)):
+            self._upd_phase = "deferred"
+            self._ui(lambda h=head: self._upd_render(
+                h + "：磁盘空间不足，清理后自动重试", warn=True))
+            return
+        self._upd_phase = "downloading"
+        self._ui(lambda h=head: self._upd_render(h + "：下载中 0%"))
+
+        def on_progress(f):
+            self._ui(lambda f=f: (
+                None if self._upd_phase != "downloading" else
+                self.upd_lab.config(
+                    text=head + f"：下载中 {int(f * 100)}%")))
+
+        try:
+            urls = info.get("pkg_urls") or [_abs_url(info)]
+            zp = au.download_any(urls, str(latest.get("sha256")),
+                                 int(info.get("size") or 0),
+                                 au.zip_path(build), on_progress=on_progress)
+            au.stage(build, zp)
+            au.cleanup_old(build)
+            au.save_ready({"version": str(latest.get("version")),
+                           "build": build,
+                           "sha256": str(latest.get("sha256")),
+                           "notes": str(latest.get("notes") or "")[:200],
+                           "required": bool(info.get("required")),
+                           "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+            self._upd_phase = "ready"
+            self._ui(lambda h=head, n=note: self._upd_ready_ui(h, n))
+        except Exception as e:                  # noqa: BLE001 失败下一拍重试
+            LOG.warning("更新下载失败:%s", e)
+            self._upd_phase = "none"
+            self._ui(lambda h=head, err=str(e)[:60]: self._upd_render(
+                h + f"：下载失败（{err}），稍后自动重试", warn=True))
+
+    def _upd_ready_ui(self, head, note):
+        self._upd_render(head + "：已就绪"
+                         + ("（更新说明：" + note + "）" if note else ""))
+        self.upd_restart.config(
+            command=self._update_restart,
+            text=("重启并升级" if (self._upd_info or {}).get("required")
+                  else "重启并更新"))
+        self.upd_restart.pack(side="left", padx=(dpi.px(8), 0))
+        self._tray_tip("新版本已就绪")
+
+    def _update_restore_ready(self):
+        """重启后恢复「已就绪」状态(staged 还在,直接可应用)。"""
+        import toolbox.auto_update as au
+        r = au.ready_info()
+        if not r or not (au.stage_dir(r.get("build", ""))
+                         / "GameBuddy" / "GameBuddy.exe").is_file():
+            return
+        self._upd_phase = "ready"
+        self._upd_info = {"latest": {"version": r.get("version"),
+                                      "build": r.get("build"),
+                                      "notes": r.get("notes", "")},
+                          "required": r.get("required")}
+        self.after(800, lambda: self._upd_ready_ui(
+            f"新版本 v{r.get('version')}（{r.get('build')}）",
+            str(r.get("notes") or "")[:80]))
+
+    def _update_now(self):
+        """手动检查入口。"""
+        if self._upd_phase in ("downloading", "ready"):
+            return
+        self._upd_render("检查更新中…")
+        threading.Thread(target=lambda: self._update_cycle(manual=True),
+                         daemon=True).start()
+
+    def _update_restart(self):
+        """用户确认重启并应用更新;剪辑进行中不给入口。"""
+        import toolbox.auto_update as au
+        if self._producing_now():
+            self._flash("正在剪辑，完成后再来重启更新", BRAND["warn"])
+            return
+        build = str(((self._upd_info or {}).get("latest") or {}).get("build")
+                    or au.ready_info().get("build") or "")
+        sd = au.stage_dir(build)
+        if not (sd / "GameBuddy" / "GameBuddy.exe").is_file():
+            self._flash("更新文件不完整，请重新检查更新", BRAND["warn"])
+            self._upd_phase = "none"
+            self.upd_restart.pack_forget()
+            return
+        if not messagebox.askyesno(
+                "重启并更新",
+                "更新会在重启时自动完成（约 1-2 分钟），\n"
+                "账号、队列与设置都会保留。\n\n确定现在重启？"):
+            return
+        try:
+            app_dir = (Path(sys.executable).resolve().parent
+                       if getattr(sys, "frozen", False) else Path(ROOT))
+            cmd = au.build_apply_cmd(
+                app_dir, sd, os.getpid(), au.UPDATE_DIR / "apply.log")
+            au.launch_apply(cmd)
+        except Exception as e:                  # noqa: BLE001
+            LOG.warning("更新应用脚本生成失败:%s", e)
+            self._flash(f"无法启动更新：{str(e)[:60]}", BRAND["danger"])
+            return
+        self._flash("正在退出并应用更新…", BRAND["primary"])
+        self.after(400, self._on_close)
+
+    def _upd_render(self, text, warn=False):
+        self.upd_lab.config(text=text,
+                            fg=BRAND["warn"] if warn else BRAND["dim"])
 
     def _daily_start(self):
         if self.daily_thread and self.daily_thread.is_alive():
