@@ -1430,12 +1430,26 @@ class PetWindow(tk.Tk):
             from toolbox.config import persist_watch_dir
             persist_watch_dir(d)
             LOG.info("监控目录已设置：%s", d)
-        except Exception as e:                  # noqa: BLE001
+        except Exception as e:                  # noqa: BLE001 持久化失败不拦选目录
             LOG.warning("watch_dir 持久化失败（本次运行仍生效）：%s", e)
         self._save_hist()
         self._render_dir()
-        self._flash("录像目录已设置，后台会自动检查新增录像", BRAND["primary"])
+        self._flash("录像目录已设置，正在检查这个文件夹…", BRAND["primary"])
         self._prod_refresh()
+        # 换目录立即扫一次(2026-10-27 用户反馈:换目录后任务最长 2h 不更新,
+        # 等下个扫描拍太迟钝)。后台线程扫,完成后 UI 自动出现新任务;
+        # 之后仍按正常 2h 节拍巡扫。
+        def scan_now():
+            import toolbox.folder_watch as fw
+            try:
+                new = fw.scan(d)
+                if new:
+                    LOG.info("换目录即时扫描：%d 个新目标", new)
+            except Exception as e:              # noqa: BLE001 失败不影响主流程
+                LOG.warning("换目录即时扫描失败：%s", e)
+            self._ui(self._prod_refresh)
+        threading.Thread(target=scan_now, daemon=True,
+                         name="scan-on-dir-change").start()
 
     # ---------- 桌面录制 ----------
 

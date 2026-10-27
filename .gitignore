@@ -34,3 +34,6 @@ desktop.ini
 .idea/
 .vscode/
 .zcodeignore
+
+# 排除出监控树的测试素材(同 video/,绝不入库)
+video_excluded/
