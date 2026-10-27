@@ -46,6 +46,10 @@ PIPELINE_STAGES = [("download", "下载"), ("asr", "转写"),
                    ("knockdowns", "击倒切片"), ("pickups", "拾取切片"),
                    ("queues", "匹配截图"), ("voice", "语音评估"),
                    ("push", "上传")]
+# 阶段耗时权重(合计 1.0,口径同 pet.ProgressParser;detect 大头可细化到分片)
+STAGE_WEIGHT = {"download": .02, "asr": .03, "speaker": .01, "detect": .75,
+                "knockdowns": .10, "pickups": .06, "queues": .01,
+                "voice": .01, "push": .01}
 STAGE_CN = dict(PIPELINE_STAGES)
 
 _PROGRESS = {}          # session -> {"stage","index","total","ts","started"}
@@ -289,7 +293,7 @@ def expire_leases(state=None):
     state = state if state is not None else _load()
     cfg = _cfg()
     lease_sec = int(cfg.get("lease_min", 120)) * 60
-    amax = int(cfg.get("attempts_max", 3))
+    amax = int(cfg.get("attempts_max", 5))
     changed = False
     for j in state["jobs"].values():
         if j["state"] != "running":
@@ -328,7 +332,7 @@ def finish(key, ok, note="", state=None):
     j = state["jobs"].get(key)
     if not j:
         return
-    amax = int(_cfg().get("attempts_max", 3))
+    amax = int(_cfg().get("attempts_max", 5))
     j.pop("taken_ts", None)
     if ok:
         j["state"], j["note"] = "done", note
@@ -370,7 +374,37 @@ def _progress_begin(session):
     with _PROGRESS_LOCK:
         _PROGRESS[session] = {"stage": "准备", "index": 0,
                              "total": len(PIPELINE_STAGES),
-                             "ts": time.time(), "started": time.time()}
+                             "ts": time.time(), "started": time.time(),
+                             "done": set(), "det_done": 0, "kd_done": 0}
+
+
+def _progress_frac(info):
+    """按阶段权重算整体进度(0..1)。跳过=完成;detect/knockdowns 细化到
+    分片(检测完成/粗簇行);其余运行中阶段算半程。供 UI 显示%与预计时间。"""
+    done = set(info.get("done") or ())
+    frac = sum(STAGE_WEIGHT.get(k, 0) for k in done)
+    parts = int(info.get("parts") or 0)
+    cur = info.get("cur") or ""
+    if cur == "detect" and parts:
+        frac += STAGE_WEIGHT["detect"] * min(1.0, info.get("det_done", 0)
+                                             / parts)
+    elif cur == "knockdowns" and parts:
+        frac += STAGE_WEIGHT["knockdowns"] * min(1.0, info.get("kd_done", 0)
+                                                 / parts)
+    elif cur:
+        frac += STAGE_WEIGHT.get(cur, 0) * 0.5
+    return min(frac, 0.99)
+
+
+def _progress_view(info):
+    """-> {stage,frac,eta_min}(eta 按已用时间外推;样本不足为 None)。"""
+    frac = _progress_frac(info)
+    eta = None
+    if frac >= 0.05:
+        el = time.time() - float(info.get("started") or time.time())
+        eta = max(0.1, el * (1 - frac) / frac / 60.0)
+    return {"stage": info.get("stage", ""), "frac": round(frac, 3),
+            "eta_min": round(eta, 1) if eta is not None else None}
 
 
 def _progress_line(session, line):
@@ -379,13 +413,21 @@ def _progress_line(session, line):
     body = line.strip()
     if body.startswith("[pipeline]"):
         body = body[len("[pipeline]"):].strip()
+    m = _re.match(r"^-- 跳过 (\w+)$", body)
+    if m and m.group(1) in STAGE_WEIGHT:
+        with _PROGRESS_LOCK:
+            cur = _PROGRESS.setdefault(session, {})
+            cur.setdefault("done", set()).add(m.group(1))
+        return
     m = _re.match(r"^(\w+) 开始", body)
     if m and m.group(1) in STAGE_CN:
         key = m.group(1)
         idx = [k for k, _ in PIPELINE_STAGES].index(key) + 1
         with _PROGRESS_LOCK:
             cur = _PROGRESS.setdefault(session, {})
-            cur.update(stage=STAGE_CN[key], index=idx, ts=time.time())
+            cur.update(stage=STAGE_CN[key], index=idx, ts=time.time(),
+                       cur=key)
+            cur.setdefault("done", set()).discard(key)
         return
     m = _re.match(r"^(\w+) 完成", body)
     if m and m.group(1) in STAGE_CN:
@@ -394,13 +436,33 @@ def _progress_line(session, line):
         with _PROGRESS_LOCK:
             cur = _PROGRESS.setdefault(session, {})
             cur.update(stage=STAGE_CN[key] + "完成", index=idx,
-                       ts=time.time())
+                       ts=time.time(), cur="")
+            cur.setdefault("done", set()).add(key)
         return
     m = _re.match(r"场次：(.+?)，(\d+) 个分片", body)
     if m:
         with _PROGRESS_LOCK:
             _PROGRESS.setdefault(session, {}).update(
                 parts=int(m.group(2)), ts=time.time())
+        return
+    m = _re.match(r"^(.{1,64}?\.mp4)：(检测完成|复用事件流)", body)
+    if m:
+        with _PROGRESS_LOCK:
+            cur = _PROGRESS.setdefault(session, {})
+            seen = cur.setdefault("det_set", set())
+            seen.add(m.group(1)[:36])
+            cur["det_done"] = len(seen)
+            cur["ts"] = time.time()
+        return
+    m = _re.match(r"^(.{1,64}?\.mp4)：\d+ 粗簇", body)
+    if m:
+        with _PROGRESS_LOCK:
+            cur = _PROGRESS.setdefault(session, {})
+            seen = cur.setdefault("kd_set", set())
+            seen.add(m.group(1)[:36])
+            cur["kd_done"] = len(seen)
+            cur["ts"] = time.time()
+        return
 
 
 def _progress_end(session):
@@ -467,11 +529,17 @@ def progress_snapshot():
 
 
 def running_progress():
-    """正在跑的单个任务进度;无则 None。"""
+    """正在跑的单个任务进度(含 frac/eta 视图);无则 None。"""
     snap = progress_snapshot()
-    for v in snap.values():
+    for s, v in snap.items():
         if "finished_ts" not in v:
-            return v
+            out = dict(v)
+            done = v.get("done")
+            if isinstance(done, set):
+                out["done"] = set(done)     # 副本防外部改共享 set
+            out.update(_progress_view(v))
+            out["session"] = s              # 任务行匹配用(_wait_reason)
+            return out
     return None
 
 

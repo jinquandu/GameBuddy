@@ -276,6 +276,16 @@ def latest_stats():
     return out
 
 
+def _eta_text(minutes):
+    """分钟 → 客户可读（<1 分钟 / 约 X 分钟 / 约 X 小时Y分）。"""
+    m = int(float(minutes) + 0.5)
+    if m <= 0:
+        return "<1 分钟"
+    if m < 60:
+        return f"约 {m} 分钟"
+    return f"约 {m // 60} 小时{m % 60}分" if m % 60 else f"约 {m // 60} 小时"
+
+
 def _abs_url(info):
     """清单里的包 url(可能相对)→ 绝对地址(按清单候选 origin 拼)。"""
     import toolbox.auto_update as au
@@ -1145,8 +1155,14 @@ class PetWindow(tk.Tk):
             pr = prod.get("progress") or {}
             if q.get("running") and pr.get("stage"):
                 badge = "剪辑中…"
+                extra = ""
+                if pr.get("frac"):
+                    extra = f" · {int(pr['frac'] * 100)}%"
+                    if pr.get("eta_min") is not None:
+                        extra += " · 预计还需 " + _eta_text(pr["eta_min"])
                 detail = (f"正在处理本机录像：{pr.get('stage')}"
-                          f"（第 {pr.get('index', 1)}/{pr.get('total', 9)} 步）")
+                          f"（第 {pr.get('index', 1)}/{pr.get('total', 9)} 步"
+                          f"{extra}）")
             elif cloud == "running":
                 badge = "云端生成中…"
                 detail = "录像已上传，云端正在生成 3 条候选（约 20 分钟）"
@@ -1240,8 +1256,13 @@ class PetWindow(tk.Tk):
         if st == "running":
             pr = prod.get("progress") or {}
             if pr.get("session") == j.get("session") and pr.get("stage"):
-                return f"{pr['stage']}（第 {pr.get('index', 1)}/" \
-                       f"{pr.get('total', 9)} 步）"
+                head = f"{pr['stage']}（第 {pr.get('index', 1)}/{pr.get('total', 9)} 步）"
+                tail = []
+                if pr.get("frac"):
+                    tail.append(f"{int(pr['frac'] * 100)}%")
+                if pr.get("eta_min") is not None:
+                    tail.append(_eta_text(pr["eta_min"]))
+                return head + (" · " + " · ".join(tail) if tail else "")
             return "正在识别本机录像…"
         if st == "failed":
             n = (j.get("note") or "").strip()

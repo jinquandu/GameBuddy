@@ -143,6 +143,31 @@ def main():
         _spawn([_PY, "-c", "print(chr(10).join('x%d' % i for i in range(50)))"]))
     check(_rc4 == 0 and "x49" in _out4, "drain:尾部保留")
 
+    # ---- 进度模型(2026-10-27:任务行 % 与预计时间)
+    import time as _tm
+    fw._PROGRESS.clear()
+    fw._progress_begin('PS')
+    fw._progress_line('PS', '[pipeline] 场次：PS，4 个分片')
+    fw._progress_line('PS', '[pipeline] -- 跳过 asr')
+    fw._progress_line('PS', '[pipeline] -- 跳过 speaker')
+    fw._progress_line('PS', '[pipeline] detect 开始 ...')
+    for i in range(3):
+        fw._progress_line('PS', f'part{i}.mp4：检测完成')
+    v = fw.running_progress()
+    check(v.get('session') == 'PS', '进度:视图带 session(任务行匹配)')
+    expect = .03 + .01 + .75 * 3 / 4
+    check(abs(v['frac'] - expect) < 0.01, f'进度:权重+分片计数 frac≈{expect:.2f}')
+    check(v['eta_min'] is not None, '进度:eta 有值')
+    fw._progress_line('PS', '[pipeline] detect 完成 (600s)')
+    fw._progress_line('PS', '[pipeline] knockdowns 开始 ...')
+    fw._progress_line('PS', 'part0.mp4：3 粗簇 -> x')
+    v2 = fw.running_progress()
+    check(abs(v2['frac'] - (.04 + .75 + .10 * 1 / 4)) < 0.01,
+          '进度:detect 完成入账,knockdowns 按分片推进')
+    fw._progress_end('PS')
+    check(fw.running_progress() is None, '进度:结束视图清空')
+    fw._PROGRESS.clear()
+
     print(f"PASS: {ok} 项断言全部通过")
 
 

@@ -59,6 +59,7 @@ folder_watch:
   production_window_s: 86400  # 滚动生产窗口（秒）：窗口内只触发一次（客户端
                            # 口径；服务端建组窗口 409 为最终权威）
   stable_min: 10           # 视频静置判稳分钟数（写入中不处理/不计新增）
+  attempts_max: 5          # 单任务自动重试上限（2026-10-27 由 3 调 5）
 
 # ---- 桌面录制（工作台「桌面录制」卡片 / toolbox screenrec）----
 screenrec:

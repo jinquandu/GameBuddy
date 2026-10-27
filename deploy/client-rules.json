@@ -1,12 +1,12 @@
 {
-  "rules_version": "2026-10-26-1",
+  "rules_version": "2026-10-27-1",
   "folder_watch": {
     "threshold_gb": 2,
     "scan_interval_min": 120,
     "daily_hour": 4,
     "stable_min": 10,
     "production_window_s": 86400,
-    "attempts_max": 3,
+    "attempts_max": 5,
     "lease_min": 120
   }
 }
