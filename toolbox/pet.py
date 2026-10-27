@@ -1836,6 +1836,12 @@ class PetWindow(tk.Tk):
                         new = fw.scan(wdir)
                         if new:
                             LOG.info("扫描入队：%d 个新目标", new)
+                        # 顺带回收陈旧租约(2026-10-27):宿主被杀留下的
+                        # 「running」任务原本要卡到下一生产窗口才回收——
+                        # 用户整晚看着「处理中」。扫描拍内回收,2h 内出结果。
+                        if fw.expire_leases():
+                            LOG.info("已回收超时租约（详见队列状态）")
+                            self._ui(self._prod_refresh)
                     except Exception as e:          # noqa: BLE001
                         LOG.warning("扫描失败：%s", e)
                     next_scan = time.time() + scan_min * 60

@@ -475,6 +475,29 @@ def running_progress():
     return None
 
 
+def _drain_proc(proc, on_line=None, keep=2000):
+    """读子进程 stdout 到 EOF 并**等待退出**,返回 (returncode, 尾部输出)。
+
+    2026-10-27 修复(r7 引入的回归):此前逐行读完流后直接取
+    proc.returncode——Python 只在 wait() 后才回填它,EOF 不等于已收割,
+    导致**正常完成的跑链也被记 rc=None,任务误判失败并重试**(mk4 场次
+    「退出码None」即此)。EOF 后 wait 兜底 60s,仍挂着才强杀(防僵尸)。
+    on_line: 每行回调(进度登记);行数超 4000 滚动裁剪防吃内存。"""
+    lines = []
+    for line in proc.stdout or []:
+        lines.append(line)
+        if len(lines) > 4000:
+            del lines[:1000]
+        if on_line:
+            on_line(line.rstrip("\n"))
+    try:
+        proc.wait(timeout=60)               # EOF=子进程已关流,退出在即
+    except subprocess.TimeoutExpired:       # 极端:EOF 后仍挂着 -> 强杀
+        proc.kill()
+        proc.wait(timeout=10)
+    return proc.returncode, "".join(lines)[-keep:]
+
+
 def run_pipeline_subprocess(target_path):
     """跑链子进程（与 pet 同配方：exe 形态自身即 CLI；UTF-8；管道收集）。
 
@@ -495,22 +518,19 @@ def run_pipeline_subprocess(target_path):
                             text=True, encoding="utf-8", errors="replace",
                             creationflags=_proc_mod().NO_WINDOW)
     _CURRENT = proc
-    # 逐行读:一边保留尾部输出,一边把阶段推进登记到 _PROGRESS,供 UI 显示
-    # 「正在做什么」(REQ-20261022-008)。读流不改变退出码语义。
+    # 排空+等待由 _drain_proc 负责(含 returncode 修复:EOF 后必须 wait);
+    # 逐行回调把阶段推进登记到 _PROGRESS,供 UI 显示「正在做什么」
+    # (REQ-20261022-008)。
     session = (Path(target_path).name if Path(target_path).is_dir()
                else Path(target_path).parent.name)
     _progress_begin(session)
-    lines = []
     try:
-        for line in proc.stdout or []:
-            lines.append(line)
-            if len(lines) > 4000:              # 防超长输出吃内存
-                del lines[:1000]
-            _progress_line(session, line.rstrip("\n"))
+        rc, tail = _drain_proc(
+            proc, on_line=lambda ln: _progress_line(session, ln))
     finally:
         _CURRENT = None
         _progress_end(session)
-    return proc.returncode, ("".join(lines))[-2000:]
+    return rc, tail
 
 
 def process_pending(watch_dir, runner=run_pipeline_subprocess, limit=1):

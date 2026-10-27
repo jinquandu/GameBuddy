@@ -119,6 +119,30 @@ def main():
             check(True, "kill_current 空闲安全")
         finally:
             fw.QUEUE_FILE = real_q
+    # ---- _drain_proc(2026-10-27 修复回归:EOF 后必须 wait,否则 rc=None)
+    import subprocess as _sp
+    import sys as _sys
+    _NW = getattr(_sp, "CREATE_NO_WINDOW", 0)
+    _PY = _sys.executable
+
+    def _spawn(args):
+        return _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.STDOUT,
+                         text=True, encoding="utf-8", errors="replace",
+                         creationflags=_NW)
+
+    _rc, _out = fw._drain_proc(_spawn([_PY, "-c", "print('a'); print('b')"]))
+    check(_rc == 0 and "a" in _out and "b" in _out,
+          "drain:正常完成 rc=0(修复前恒 None)")
+    _rc2, _ = fw._drain_proc(_spawn([_PY, "-c", "import sys; sys.exit(3)"]))
+    check(_rc2 == 3, "drain:失败退出码如实透传")
+    _seen = []
+    _rc3, _ = fw._drain_proc(
+        _spawn([_PY, "-c", "print('l1'); print('l2')"]), on_line=_seen.append)
+    check(_rc3 == 0 and _seen == ["l1", "l2"], "drain:on_line 逐行回调")
+    _rc4, _out4 = fw._drain_proc(
+        _spawn([_PY, "-c", "print(chr(10).join('x%d' % i for i in range(50)))"]))
+    check(_rc4 == 0 and "x49" in _out4, "drain:尾部保留")
+
     print(f"PASS: {ok} 项断言全部通过")
 
 
