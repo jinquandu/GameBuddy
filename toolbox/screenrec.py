@@ -306,7 +306,18 @@ class ScreenRecorder:
         if audio:
             cmd += ["-c:a", "aac", "-b:a", "160k"]
         cmd += ["-t", f"{max(1.0, dur):.1f}",
-                "-movflags", "+faststart", str(path)]
+                # 分片 MP4 + 即时刷盘:2026-10-27 实测自动停录时文件尾停在
+                # 半个数据包(无 moov,161MB 全损)。视频输入(ddagrab)无界,
+                # stdin-EOF 终止不了 ffmpeg,CTRL_BREAK 又会打断包写入——
+                # 收尾信号没有可靠优雅路径。分片模式 moov 开头即写好;
+                # -flush_packets 1 让每个分片立刻落盘(avio 缓冲否则随进程
+                # 一起丢,实测分片了也只有 28 字节头)。任何中断最多丢
+                # 最后 ≤2s 的未完整分片,文件始终可播可剪(实测强杀后
+                # 6.07s 完整保留)。
+                "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+                "-frag_duration", "2",
+                "-flush_packets", "1",
+                str(path)]
         kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE}
         if audio:
             kw.update(stdin=subprocess.PIPE)
@@ -337,10 +348,17 @@ class ScreenRecorder:
             pass
 
     def _end_segment(self):
-        """优雅结束当前 ffmpeg（写完 moov）。"""
+        """结束当前分P的 ffmpeg(尽量优雅;文件完整性由分片 MP4 兜底)。"""
         p = self._proc
         if not p or p.poll() is not None:
             return
+        # 会话停止:先关音频管道(EOF,写线程也可能已关,幂等)——音频流
+        # 干净收束;视频输入无界不会自然退,再 BREAK。
+        if self._stop_flag.is_set():
+            try:
+                p.stdin.close()
+            except (AttributeError, OSError, ValueError):
+                pass
         try:
             if hasattr(signal, "CTRL_BREAK_EVENT"):
                 p.send_signal(signal.CTRL_BREAK_EVENT)

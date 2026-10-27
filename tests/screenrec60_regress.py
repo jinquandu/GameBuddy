@@ -78,6 +78,10 @@ def main():
         check("hwdownload,format=bgra" in c, "dda 带 hwdownload 滤镜")
         check("-threads" in c and c[c.index("-threads") + 1] == "8",
               "x264 线程封顶 -threads 8（默认）")
+        check("+frag_keyframe+empty_moov+default_base_moof" in c
+              and c[c.index("-flush_packets") + 1] == "1"
+              and c[c.index("-frag_duration") + 1] == "2",
+              "分片 MP4+即时刷盘(强杀下文件仍可播,2026-10-27 修复)")
         check(c.count("-map") == 2 and c[c.index("-map") + 1] == "0:v"
               and c[c.index("-map", c.index("-map") + 1) + 1] == "1:a",
               "双输入显式 -map 0:v -map 1:a")
