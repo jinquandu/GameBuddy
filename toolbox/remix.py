@@ -14,6 +14,7 @@
   - 发布包：cover.jpg 自动封面 + 标题/标签 Jinja2 模板化 -> publish.json。
 """
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -21,11 +22,17 @@ from pathlib import Path
 
 import yaml
 
+from toolbox.common import get_logger
 from toolbox.config import DATA, FONTS_DIR, TEMPLATES_DIR, load_config
+
+log = get_logger("remix")
 
 REQUIRED_KEYS = ("name", "resolution")
 FFMPEG = "ffmpeg"
 LOUDNESS_I = -14        # 成片目标响度（EBU R128，抖音等移动端标准）
+# ffmpeg/ffprobe 只放行本地文件协议（安全审计 H-05：src 会被直接当输入
+# 打开，禁 http/tcp/concat/pipe 等协议可封 SSRF 与协议滥用出口）。
+PROTO_FILE = ("-protocol_whitelist", "file")
 
 
 # ---------------------------------------------------------------- 模板
@@ -44,21 +51,64 @@ def load_template(name):
 
 # ---------------------------------------------------------------- 片段池
 
+def _looks_like_url(src):
+    """协议 URL 形态判定：`://`（http/tcp/concat…）或首段内出现冒号且不是
+    Windows 盘符（`pipe:0`、`md5:`、`file:x` 等裸协议形态）。"""
+    if "://" in src:
+        return True
+    first_seg = re.split(r"[\\/]", src, 1)[0]
+    if ":" not in first_seg:
+        return False
+    return re.fullmatch(r"[A-Za-z]:?", first_seg) is None   # C: / C 是盘符
+
+
+def _src_ok(src):
+    """事件 src 安全校验（安全审计 H-05）：events.jsonl 由客户端上传，行内
+    src 会直接成为 ffmpeg/ffprobe 输入。只放行本机文件路径——
+
+    - 非 str / 空 / 协议 URL 形态即拒；
+    - 服务端容器内（TOOLBOX_DATA_DIR 已注入）进一步夹紧：resolve 后必须
+      落在租户根（DATA 的上级——源片 sessions/ 与 data/ 同在其下）之内，
+      杜绝指向他租户/容器内任意文件；
+    - 端侧本地跑（未注入）不设基地约束：端侧 events 自产，src 是本机
+      绝对路径（Windows 盘符含 `:`，由盘符判据放行）。
+    """
+    if not isinstance(src, str) or not src or _looks_like_url(src):
+        return False
+    root = os.environ.get("TOOLBOX_DATA_DIR")
+    if root:
+        try:
+            p = Path(src).resolve()
+            base = Path(root).resolve().parent
+            return base == p or base in p.parents
+        except OSError:
+            return False
+    return True
+
+
 def discover_pool():
     """扫描 data/reports/*_full/events.jsonl 建片段池。
 
     返回 {"videos": {src: {"sents": [...]|None}}, "events": [事件]}，
     事件带 src（源视频绝对路径），转写按 game 字段匹配（无则不 snap）。
+    src 未过安全校验的行剔除并留痕（不进生产，H-05）。
     """
-    videos, events = {}, []
+    videos, events, dropped = {}, [], 0
     for rpt in sorted(DATA.joinpath("reports").glob("*_full/events.jsonl")):
         for line in rpt.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 e = json.loads(line)
+                if not _src_ok(e.get("src")):
+                    dropped += 1
+                    log.warning("事件 src 越界剔除 rpt=%s src=%r",
+                                rpt.parent.name, str(e.get("src"))[:160])
+                    continue
                 e["part_dir"] = rpt.parent.name
                 events.append(e)
                 if e["src"] not in videos:
                     videos[e["src"]] = {"sents": _match_transcript(e["src"])}
+    if dropped:
+        print(f"  警告：剔除 {dropped} 行越界 src 事件（安全校验，详见日志）")
     return {"videos": videos, "events": events}
 
 
@@ -121,7 +171,8 @@ def _dump_frames(src, t0, dur, fps, size, gray=True):
     d = tempfile.mkdtemp(prefix="shots_")
     try:
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-                        "-ss", f"{max(0.0, t0):.2f}", "-t", f"{dur:.2f}", "-i", str(src),
+                        "-ss", f"{max(0.0, t0):.2f}", "-t", f"{dur:.2f}",
+                        *PROTO_FILE, "-i", str(src),
                         "-vf", f"fps={fps},scale={size[0]}:{size[1]}",
                         "-pix_fmt", "gray" if gray else "rgb24",
                         str(Path(d) / "f%04d.png")], check=True)
@@ -701,7 +752,8 @@ def plan_reframe(seg, res, tpl):
     if not cfg.get("enabled", True) or not seg.get("src"):
         return None
     w, h = (int(x) for x in res.lower().split("x"))
-    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+    out = subprocess.run(["ffprobe", "-v", "error", *PROTO_FILE,
+                          "-select_streams", "v:0",
                           "-show_entries", "stream=width,height", "-of", "csv=p=0",
                           str(seg["src"])], capture_output=True, text=True)
     try:
@@ -749,7 +801,7 @@ def _render_clip(seg, out, a, b, speed, res, tpl, flash, crop=None):
         af = f"atempo={speed},{af}"
     subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                     "-ss", f"{a:.2f}", "-t", f"{dur:.2f}",
-                    "-i", seg["src"], *inputs,
+                    *PROTO_FILE, "-i", str(seg["src"]), *inputs,
                     "-filter_complex", graph,
                     "-map", "[v]", "-map", "0:a?",
                     "-af", af,
@@ -834,8 +886,9 @@ def render_remix(edl, out_dir, tpl):
     concat.write_text("".join(f"file '{work / p}'\n" for p in parts),
                       encoding="utf-8")
     final = out_dir / f"{edl['template']}.mp4"
-    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "concat",
-                    "-safe", "0", "-i", str(concat), "-c", "copy",
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error",
+                    "-f", "concat", "-safe", "0", *PROTO_FILE,
+                    "-i", str(concat), "-c", "copy",
                     "-movflags", "+faststart", "-y", str(final)], check=True)
     subprocess.run([FFMPEG, "-hide_banner", "-v", "error", "-i", str(final),
                     "-f", "null", "-"], check=True)            # 解码全通校验

@@ -42,11 +42,13 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # 端侧<->服务端契约版本：与 docs/SERVER-INTERFACE.md 同步维护（先改文档再改
 # 此值）；写入 manifest.json 供服务端检测端侧契约版本。分级见契约文档 §0。
+# 1.3.3：服务端安全加固——manifest 路径字段单段成分校验、events src 归一
+# 剔除、prune rmtree 夹紧（安全审计 H-03/H-05/M-04，REQ-20261027-001）；
 # 1.3.0：受控 HTTPS 上传通道 C2S-6~9（Bearer 租户 token、路径白名单、
 # 分块续传、complete 自动 import；REQ-20261019-005）；
 # 1.2.0：events.jsonl kind=loadout 补 meta.hero/weapons（REQ-20261014-002）；
 # 1.1.2/1.1.3 为逐场报告线补录与 site_url 迁移（2026-10-14 并轨编号，见 §8）。
-CONTRACT_VERSION = "1.3.2"
+CONTRACT_VERSION = "1.3.3"
 
 
 # ---------------------------------------------------------------- 会话发现
@@ -730,14 +732,65 @@ def _localize_publish(tdir: Path, remote_root):
 
 # ---------------------------------------------------------------- 服务端 import-session
 
+# 安全审计 2026-10-26（H-03/M-04，外部报告）：manifest 由客户端生成上传，
+# 其路径字段（parts[].filename/asr_dir/events_rpt、lines.knockdowns/pickups/
+# voice[]）在服务端被直接拼接进文件系统读写/rmtree——属客户端信任边界输入，
+# 必须按「单段安全成分」校验。合法客户端产物（discover_session 构造）天然
+# 满足：均为不含路径分隔符的目录/文件名。越界字段一律拒绝，服务端不猜路径。
+_SAFE_MAX_BYTES = 255
+
+
+def _safe_component(value, field):
+    """manifest 路径字段校验：只放行单段文件/目录名。
+
+    拒绝：非字符串/空、`.`/`..`、路径分隔符（`/` `\\`）、冒号（Windows
+    盘符与 NTFS ADS）、控制字符、超 255 字节。"""
+    v = value if isinstance(value, str) else str(value)
+    if (not v or v in (".", "..")
+            or "/" in v or "\\" in v or ":" in v
+            or len(v.encode("utf-8")) > _SAFE_MAX_BYTES
+            or any(ord(c) < 0x20 or ord(c) == 0x7F for c in v)):
+        raise ValueError(
+            f"manifest 字段 {field} 含不安全路径成分，拒绝导入: {value!r}")
+    return v
+
+
+def _contained(path: Path, base: Path) -> Path:
+    """拼接结果 resolve 后必须仍在 base 之下（防符号链接等逃逸，纵深防御）。"""
+    p, b = Path(path).resolve(), Path(base).resolve()
+    if p != b and b not in p.parents:
+        raise ValueError(f"路径越界: {path} 不在 {base} 之内")
+    return p
+
+
+def _rel(p, base):
+    """审计留痕用相对路径：resolve 前后混用（Windows 短名/盘符大小写）时
+    双双 resolve 再试，仍失败退回绝对路径字符串。"""
+    try:
+        return str(Path(p).relative_to(base))
+    except ValueError:
+        try:
+            return str(Path(p).resolve().relative_to(Path(base).resolve()))
+        except ValueError:
+            return str(p)
+
+
 def import_session(session, remote_root=None):
     """【服务端】push 后收口：路径重映射 + 会话状态登记。幂等可重跑。
 
     仅改写"客户端绝对路径 -> 服务端 sessions/<场次>/video/ 绝对路径"的精确匹配
-    （transcript.game、events.jsonl 每行 src）；已是服务端路径的行原样保留。
+    （transcript.game、events.jsonl 每行 src）；已是服务端路径的行原样保留；
+    src 不属于本会话任何已登记视频的行**剔除并留痕**（安全审计 H-05：恶意
+    src 会原样流入服务端生产，被 ffmpeg/ffprobe 直接打开）。
+    manifest 路径字段校验失败 → 抛错整体拒绝（合法客户端不受影响）。
     """
     cfg = load_config()
     root = Path(remote_root or cfg["server"]["remote_root"])
+    # 场次名是 sessions/ 下单个目录名（与 C2S-7 的 session 规则同口径）
+    if ("/" in session or "\\" in session or session in (".", "..")
+            or not session or len(session) > 80
+            or any(ord(c) < 0x20 for c in session)):
+        raise ValueError(f"场次名含不安全成分，拒绝导入: {session!r}")
     sdir = root / "sessions" / session
     log.info("import_session 开始 session=%r remote_root=%s", session, root)
     if not (sdir / "manifest.json").is_file():
@@ -751,7 +804,26 @@ def import_session(session, remote_root=None):
         print(f"[警告] 端侧契约版本 {mv or '(缺省)'} 与服务端 {CONTRACT_VERSION} 主版本不同，"
               "请确认双端是否同步发版")
 
-    remapped = unchanged = 0
+    remapped = unchanged = dropped = 0
+    # 先整体校验全部路径字段（任一越界即整体拒绝，不做部分导入），并登记
+    # 本会话合法视频映射：client_video -> server_video（src 归一白名单）。
+    video_map = {}
+    for part in manifest["parts"]:
+        _safe_component(part["filename"], "parts[].filename")
+        if part.get("asr_dir"):
+            _safe_component(part["asr_dir"], "parts[].asr_dir")
+        if part.get("events_rpt"):
+            _safe_component(part["events_rpt"], "parts[].events_rpt")
+        if part.get("client_video"):
+            video_map[str(part["client_video"])] = str(sdir / "video" / part["filename"])
+    server_videos = set(video_map.values())
+    mlines = manifest.get("lines") or {}
+    for key in ("knockdowns", "pickups"):
+        if mlines.get(key):
+            _safe_component(mlines[key], f"lines.{key}")
+    for i, vd in enumerate(mlines.get("voice") or []):
+        _safe_component(vd, f"lines.voice[{i}]")
+
     for part in manifest["parts"]:
         client_video = part.get("client_video")
         server_video = str(sdir / "video" / part["filename"])
@@ -759,6 +831,7 @@ def import_session(session, remote_root=None):
             continue
         asr_dir = DATA / "asr" / part["asr_dir"] if part.get("asr_dir") else None
         if asr_dir:
+            _contained(asr_dir, DATA / "asr")
             for jf in (asr_dir / "transcript.json", asr_dir / "speaker_labeled.json"):
                 if not jf.is_file():
                     continue
@@ -772,6 +845,7 @@ def import_session(session, remote_root=None):
                     unchanged += 1
         rpt = DATA / "reports" / part["events_rpt"] if part.get("events_rpt") else None
         if rpt and (rpt / "events.jsonl").is_file():
+            _contained(rpt, DATA / "reports")
             out = []
             for l in (rpt / "events.jsonl").read_text(encoding="utf-8").splitlines():
                 if not l.strip():
@@ -781,11 +855,19 @@ def import_session(session, remote_root=None):
                 except json.JSONDecodeError:   # 历史截断尾行：跳过，不让 push 炸
                     print(f"  警告：{rpt.name} 损坏行跳过（src 重映射）")
                     continue
-                if e.get("src") == client_video:
+                src = e.get("src")
+                if src == client_video:
                     e["src"] = server_video
                     remapped += 1
+                elif src in server_videos:
+                    unchanged += 1     # 已是本会话服务端路径（幂等重跑原样保留）
                 else:
-                    unchanged += 1
+                    # 安全审计 H-05：未匹配 src 不得原样落盘——它会被服务端
+                    # 生产（remix/ffprobe）直接当输入打开（任意文件读/SSRF）。
+                    dropped += 1
+                    log.warning("events src 越界剔除 session=%r rpt=%s src=%r",
+                                session, rpt.name, str(src)[:160])
+                    continue
                 out.append(json.dumps(e, ensure_ascii=False))
             tmp = rpt / "events.jsonl.tmp"   # 原子替换，中途被杀不留截断
             tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
@@ -814,10 +896,11 @@ def import_session(session, remote_root=None):
     })
     state_p.write_text(json.dumps(state, ensure_ascii=False, indent=2),
                        encoding="utf-8")
-    print(f"[{session}] 重映射 {remapped} 处 / 未匹配 {unchanged}；"
+    print(f"[{session}] 重映射 {remapped} 处 / 未匹配 {unchanged}"
+          f" / 剔除越界 src {dropped} 行；"
           f"video_ready={state['video_ready']} -> {state_p}")
-    log.info("import_session 完成 session=%r remapped=%d unchanged=%d "
-             "video_ready=%s", session, remapped, unchanged,
+    log.info("import_session 完成 session=%r remapped=%d unchanged=%d dropped=%d "
+             "video_ready=%s", session, remapped, unchanged, dropped,
              state["video_ready"])
 
 
@@ -880,20 +963,35 @@ def sessions(action="list", keep=None, tenant=None):
                 continue
             for e in victims:
                 doomed = [e["dir"]]
+                # session.json 的 parts/lines 字段历史上可被客户端 manifest
+                # 注入（安全审计 H-03）：rmtree 前逐条「单段成分 + resolve
+                # 夹紧在 data 树内」双重校验，越界条目跳过并留痕，绝不删除。
+                cand = []
                 for p in e["state"].get("parts", []):
                     if p.get("asr_dir"):
-                        doomed.append(data_root / "asr" / p["asr_dir"])
+                        cand.append(("parts.asr_dir", p["asr_dir"], "asr"))
                     if p.get("events_rpt"):
-                        doomed.append(data_root / "reports" / p["events_rpt"])
+                        cand.append(("parts.events_rpt", p["events_rpt"], "reports"))
                 lines = e["state"].get("lines", {})
                 if lines.get("knockdowns"):
-                    doomed.append(data_root / "knockdowns" / lines["knockdowns"])
+                    cand.append(("lines.knockdowns", lines["knockdowns"], "knockdowns"))
                 if lines.get("pickups"):
-                    doomed.append(data_root / "pickups" / lines["pickups"])
+                    cand.append(("lines.pickups", lines["pickups"], "pickups"))
                 if lines.get("report"):
-                    doomed.append(data_root / "game_reports" / lines["report"])
+                    cand.append(("lines.report", lines["report"], "game_reports"))
                 for vd in lines.get("voice") or []:
-                    doomed.append(data_root / "voice" / vd)
+                    cand.append(("lines.voice", vd, "voice"))
+                for field, name, sub in cand:
+                    try:
+                        _safe_component(name, field)
+                        d = _contained(data_root / sub / str(name), data_root)
+                        if d == data_root.resolve():
+                            raise ValueError("拒绝删除 data 根自身")
+                    except ValueError as ex:
+                        log.warning("prune 跳过越界条目 tenant=%s session=%r: %s",
+                                    t.name, e["dir"].name, ex)
+                        continue
+                    doomed.append(d)
                 for d in doomed:
                     if d and d.is_dir():
                         shutil.rmtree(d)
@@ -902,7 +1000,7 @@ def sessions(action="list", keep=None, tenant=None):
                 # 删除审计：prune 不可逆，留痕每个被删目录（不可重建的会话状态在列）
                 log.info("prune 删除 tenant=%s session=%r imported_at=%s "
                          "dirs=%s", t.name, e["dir"].name, e["ts"] or "?",
-                         [str(d.relative_to(t)) for d in doomed if d])
+                         [_rel(d, t) for d in doomed if d])
         print(f"prune 完成：每租户保留最近 {keep} 个会话")
         log.info("prune 完成 keep=%d tenants=%s", keep,
                  [t.name for t in targets])

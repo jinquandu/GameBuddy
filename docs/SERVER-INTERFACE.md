@@ -304,7 +304,12 @@ POST /uploads/<id>/complete
 
 服务端动作（全过才入正式目录）：①逐文件 `received==size` 且实际 SHA-256
 复核（不符 → 422 `checksum_mismatch`，该文件清零重传）；②manifest 校验
-（dict；`contract_version`/`session`/`mode` 与会话一致）后由**服务端落盘**
+（dict；`contract_version`/`session`/`mode` 与会话一致；**路径字段单段
+安全成分校验（1.3.3 安全加固）**：`session`、`parts[].filename/asr_dir/
+events_rpt`、`lines.knockdowns/pickups/voice[]` 须为不含路径分隔符
+（`/` `\`）、`..`、`:`（盘符/ADS）与控制字符的单段名且 ≤255 字节，越界
+400 `invalid_path`——合法端侧产物天然满足，仅拦手工构造清单的路径遍历）
+后由**服务端落盘**
 `sessions/<session>/manifest.json`；③staging 文件移入租户正式目录（覆盖
 同名，幂等）；④以 C2S-4 同形态 `docker exec` 触发 import-session
 （`run_eval` 且 mode=eval 时追加 eval，对应 C2S-5；`no_import=true` 跳过，
@@ -356,9 +361,14 @@ python3 -m toolbox import-session <场次> --remote-root <租户根>
 ```
 
 - 前置：`sessions/<场次>/manifest.json` 必须存在，否则 FileNotFoundError；
+- **安全校验（1.3.3）**：场次名与 manifest 路径字段（见 C2S-9 ②）做同口径
+  单段成分校验，越界 → ValueError 整体拒绝（不部分导入、不猜路径）；
 - 行为：①把 `transcript.json.game`、`speaker_labeled.json.game`、
   `events.jsonl` 每行 `src` 中「端侧绝对路径」精确替换为
   `sessions/<场次>/video/<文件名>`（已是服务端路径的行原样保留）；
+  **`src` 归一（1.3.3 安全加固）**：不属于本会话任何已登记视频的行
+  **剔除并审计留痕**（`..` 越界、他租户路径、`http://` 等协议 URL——此类
+  src 会被服务端生产 remix/ffprobe 直接当输入打开）；
   ②写/更新 `session.json`（§5.3）；
 - **幂等**：可重跑，重映射按精确匹配不会二次改写。
 
@@ -384,7 +394,10 @@ python3 -m toolbox sessions [list|prune] [--keep N] [--tenant <t>]
 - `list`：按租户列出会话（imported_at、源片✓/仅评估包、占用、场次名）；
 - `prune`：每租户保留最近 N 个（默认 `server.keep_sessions`=3），连带删
   该会话在 data 树的 asr/reports/knockdowns/pickups/voice/game_reports
-  产物（remixes 成片不删）。
+  产物（remixes 成片不删）。**删除面夹紧（1.3.3 安全加固）**：session.json
+  的 parts/lines 路径字段逐条「单段成分 + resolve 后必须在 data 树内」
+  双重校验，越界条目跳过并审计留痕（防历史注入字段把 rmtree 引向
+  data 树之外）。
 
 ---
 
@@ -673,7 +686,7 @@ JSONL，每行一个事件，write-once（文件存在即为完整结论）：
 | `confidence` | float | OCR 置信度 |
 | `meta` | object | kind 相关附加信息，见下表 |
 | `price` / `price_source` | int / str | 仅 `loot`：估价与来源（`table` 价目表 / `quality` 品质兜底）；无估价时字段缺省 |
-| `src` | str | 来源分片绝对路径（import 后为服务端路径） |
+| `src` | str | 来源分片绝对路径（import 后为服务端路径）。**消费方安全口径（1.3.3）**：src 属客户端可控数据，直接当 ffmpeg/ffprobe 输入前必须校验——只放行本机文件路径（非协议 URL 形态），服务端容器内还须落在租户根内；import 时非本会话已登记视频的行已剔除 |
 
 | kind | 含义 | meta 关键字段 |
 | --- | --- | --- |
@@ -726,6 +739,13 @@ JSONL，每行一个事件，write-once（文件存在即为完整结论）：
 | `missing` | list[str] | 缺失产物说明（ASR/事件流），打标站如实显示 |
 | `lines` | object | `knockdowns`/`pickups`：目录名或 null；`voice`：目录名列表（`report` 为服务端状态键，见 §5.3，端侧 manifest 不写） |
 | `logs` | list[str]? | 可选（1.3.2 补录）：本次随包上传的端侧日志文件名（`sessions/<场次>/logs/` 下，`pet-YYYYMMDD.log` 式）；服务端不强制消费，import 幂等保留、prune 连带删除 |
+
+> **路径字段安全约束（1.3.3）**：`session`、`parts[].filename/asr_dir/
+> events_rpt`、`lines.knockdowns/pickups/voice[]` 均为服务端文件系统操作
+> 的拼接成分，属客户端信任边界输入——须为**单段安全成分**（无 `/` `\`、
+> 无 `..`、无 `:`、无控制字符、≤255 字节）。服务端 C2S-9 受理即校验
+> （越界 400 `invalid_path`），import-session 再校验兜底；合法端侧产物
+> （discover_session 构造）天然满足，正常链路不受影响。
 
 ### 5.3 session.json（`sessions/<场次>/`，服务端写）
 
@@ -850,6 +870,7 @@ import-session 幂等重跑保留）。
 
 | 日期 | 契约版本 | 接口 | 摘要 |
 | --- | --- | --- | --- |
+| 2026-10-27 | 1.3.3 | C2S-9 / SRV-1 / SRV-3 / §5.1 / §5.2 | 安全加固（外部安全审计 H-03/H-05/M-04，[REQ-20261027-001](../cut_kb/需求/REQ-20261027-001-服务端路径遍历与remix-src安全加固.md)）：①manifest 路径字段（含场次名）单段安全成分校验——C2S-9 越界 400 `invalid_path`（服务端 API 层实现为配合项）、SRV-1 整体拒绝；②SRV-1 events.jsonl 行 `src` 归一：非本会话已登记视频的行剔除并审计留痕（此前"未匹配原样保留"会让恶意 src 被服务端 remix/ffprobe 直接打开——任意文件读取外泄+SSRF）；③SRV-3 prune rmtree 逐条成分+resolve 夹紧 data 树内，越界跳过留痕（防任意目录递归删除）。合法端侧产物天然满足新校验，兼容变更。端侧已实现（CONTRACT_VERSION→1.3.3，含回归）；服务端配套：API 层校验、容器 toolbox 部署、produce 失败回执脱敏（ffmpeg/ffprobe 原始报错不回显，消除文件存在性 oracle） |
 | 2026-10-22 | 无版本变更（客户端消费面退役） | C2S-16 / C2S-17 | 应用端新手教程整体替换为**环境检测**（REQ-20261022-005）：客户端不再调用教程识别与教程推送，改为登录后本地六级检测（配置/磁盘/视频工具/demo 素材/解码/识别实测）。C2S-16/17 与服务端行为不变（仅登录、零生产副作用、每日≤3 次），保留给旧客户端；CONTRACT_VERSION 不变 | [REQ-20261022-005](../cut_kb/需求/REQ-20261022-005-环境检测替换新手教程.md) |
 | 2026-10-22 | 1.4.2(补录) | C2S-17 / §4A | 兼容性新增(REQ-20261022-003):教程完成微信推送 `POST /api/production/v1/tutorial/notify`(登录态、共用教程配额、未绑定/不可用→notified=false);通知侧需新增 `/v1/internal/tutorial-notification`(豁免 opt_in) |
 | 2026-10-22 | 1.4.1(补录) | C2S-16 / §4A | 兼容性新增（REQ-20261022-002）：新手教程识别 `POST /api/production/v1/tutorial`（登录态、豁免三前置、零生产副作用、每账号每日≤3 次）；demo 租户作品页复用公网 GET 入口。CONTRACT_VERSION 常量随下次发版同步 |
