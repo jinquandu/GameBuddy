@@ -874,6 +874,31 @@ def cpu_percent(sample=0.5):
         return None
 
 
+def mem_percent():
+    """整机内存占用(0~100):GlobalMemoryStatusEx(免子进程免 psutil)。
+    失败返回 None(调用方按不退让处理)。"""
+    if sys.platform != "win32":
+        return None
+    try:
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        ms = _MS()
+        ms.dwLength = ctypes.sizeof(_MS)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            return None
+        return float(ms.dwMemoryLoad)      # 系统口径:已用/物理总量
+    except (AttributeError, OSError):
+        return None
+
+
 def production_due(daily_hour=4, boot=False, cfg=None, state=None,
                    now=None):
     """生产是否到期(2026-10-28 新规则,用户指示):

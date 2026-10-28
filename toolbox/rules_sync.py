@@ -47,6 +47,7 @@ SPEC = {
                                                   # 2026-10-28 新规则)
     "work_end_hour": (int, 0, 23),               # 生产工作时段止(时,不含)
     "cpu_yield_percent": (float, 50.0, 100.0),   # CPU 高于该值生产退让
+    "mem_yield_percent": (float, 50.0, 100.0),   # 内存高于该值生产退让
 }
 
 

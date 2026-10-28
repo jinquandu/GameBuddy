@@ -1898,9 +1898,18 @@ class PetWindow(tk.Tk):
                     except Exception:              # noqa: BLE001
                         _cpu = None
                     _ylim = float(fw._cfg().get("cpu_yield_percent", 90))
+                    # 内存退让(2026-10-28 用户指示:>90% 同样自动退让;
+                    # 识别链自带数 GB 内存,系统已高压时开工易 OOM/卡死)
+                    _mem = fw.mem_percent()
+                    _mylim = float(fw._cfg().get("mem_yield_percent", 90))
                     if _cpu is not None and _cpu > _ylim:
                         LOG.info("生产退让：CPU %.0f%% > %.0f%%（机器忙）,"
                                  "10 分钟后复查", _cpu, _ylim)
+                        self.daily_stop.wait(timeout=600)
+                        continue
+                    if _mem is not None and _mem > _mylim:
+                        LOG.info("生产退让：内存 %.0f%% > %.0f%%（系统高压）,"
+                                 "10 分钟后复查", _mem, _mylim)
                         self.daily_stop.wait(timeout=600)
                         continue
                     gate = self._bind_gate()

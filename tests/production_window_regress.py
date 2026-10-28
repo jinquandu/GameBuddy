@@ -163,6 +163,15 @@ def main():
                   == {"cpu_yield_percent": 99.0, "work_start_hour": 4,
                       "work_end_hour": 12},
                   "新键经规则通道可下发")
+            mem = fw.mem_percent()
+            check(mem is None or 0 <= mem <= 100,
+                  f"内存采样可用或安全失败(实测 {mem}%)")
+            check(rs._clamp("mem_yield_percent", 30) == 50.0
+                  and rs._clamp("mem_yield_percent", 95) == 95.0,
+                  "mem_yield 夹紧 50~100")
+            check(rs.parse({"mem_yield_percent": 88})
+                  == {"mem_yield_percent": 88.0},
+                  "mem_yield 经规则通道可下发")
 
             # ---- 持久化往返 ----
             ts = now - 1234
