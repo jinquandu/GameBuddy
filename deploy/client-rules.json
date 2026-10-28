@@ -1,5 +1,5 @@
 {
-  "rules_version": "2026-10-28-1",
+  "rules_version": "2026-10-28-2",
   "folder_watch": {
     "threshold_gb": 2,
     "scan_interval_min": 120,
@@ -10,6 +10,7 @@
     "lease_min": 120,
     "work_start_hour": 4,
     "work_end_hour": 12,
-    "cpu_yield_percent": 90
+    "cpu_yield_percent": 90,
+    "mem_yield_percent": 90
   }
 }
