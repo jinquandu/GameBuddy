@@ -104,6 +104,9 @@ DEFAULTS = {
     "folder_watch": {
         # ---- 录像目录监控与自动跑链（toolbox/folder_watch.py，pet「监控」行）----
         "stable_min": 10,      # 视频静置判定（分钟）：写入中的不提前处理
+        "work_start_hour": 4,  # 生产工作时段起(2026-10-28 新规则:滚动 24h
+        "work_end_hour": 12,   # 窗口移除,只在凌晨4点~中午12点生产;可远程下发)
+        "cpu_yield_percent": 90.0,  # CPU 高于该值生产退让(用户在用就不抢)
         "scan_min": 15,        # 扫描周期（分钟）
         "attempts_max": 5,     # 单任务自动重试上限（含租约超时回收），超限记 failed
                           # (2026-10-27 用户指示 3→5;可被服务端规则覆盖)

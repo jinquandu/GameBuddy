@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import ctypes
 import threading
 import time
 from pathlib import Path
@@ -813,24 +814,89 @@ def new_recordings_bytes(watch_dir, window_s=PRODUCTION_WINDOW_S,
     return total
 
 
+# 工作时段(用户 2026-10-28 指示:去掉滚动 24h 窗口,改为每日固定时段生产)
+WORK_START_H, WORK_END_H = 4, 12          # 凌晨 4 点 ~ 中午 12 点(含头不含尾)
+
+
+def _in_work_hours(now=None, cfg=None):
+    """当前是否在生产工作时段内([start, end) 小时,支持跨零点配置)。"""
+    cfg = cfg if cfg is not None else _cfg()
+    now = now if now is not None else time.time()
+    import datetime
+    h = datetime.datetime.fromtimestamp(now).hour
+    start = int(cfg.get("work_start_hour", WORK_START_H))
+    end = int(cfg.get("work_end_hour", WORK_END_H))
+    if start <= end:
+        return start <= h < end
+    return h >= start or h < end          # 跨零点(如 22~6)
+
+
+class _FileTime(ctypes.Structure):
+    _fields_ = [("lo", ctypes.c_ulong), ("hi", ctypes.c_ulong)]
+
+
+class _SysTimes(ctypes.Structure):
+    """GetSystemTimes 出参(idle/kernel/user 各为 FILETIME,100ns 单位;
+    kernel 含 idle——占比用 (total-idle)/total)。"""
+    _fields_ = [("idle", _FileTime), ("kernel", _FileTime),
+                ("user", _FileTime)]
+
+
+def _get_system_times():
+    st = _SysTimes()
+    if not ctypes.windll.kernel32.GetSystemTimes(
+            ctypes.byref(st.idle), ctypes.byref(st.kernel),
+            ctypes.byref(st.user)):
+        raise OSError("GetSystemTimes failed")
+
+    def ft(f):
+        return (f.hi << 32) | f.lo
+    return ft(st.idle), ft(st.kernel), ft(st.user)
+
+
+def cpu_percent(sample=0.5):
+    """整机 CPU 占用(0~100):GetSystemTimes 前后差分(win32 自带,免子进程
+    免 psutil;wmic 在新系统已移除不可用)。采样 sample 秒;失败返回 None
+    (调用方按不退让处理)。busy=kernel+user-idle(kernel 含 idle 是
+    FILETIME 语义,直接 (total-idle)/total 即可)。"""
+    if sys.platform != "win32":
+        return None
+    try:
+        i1, k1, u1 = _get_system_times()
+        time.sleep(max(0.05, sample))
+        i2, k2, u2 = _get_system_times()
+        total = (k2 + u2) - (k1 + u1)
+        idle = i2 - i1
+        if total <= 0:
+            return None
+        return round((total - idle) * 100.0 / total, 1)
+    except (OSError, AttributeError):
+        return None
+
+
 def production_due(daily_hour=4, boot=False, cfg=None, state=None,
                    now=None):
-    """生产是否到期：开机补跑（boot，无小时门）或 ≥daily_hour，且滚动
-    24h 窗口内未生产过。返回 (due: bool, why: str)——why 供日志留痕。"""
+    """生产是否到期(2026-10-28 新规则,用户指示):
+
+    - **去掉滚动 24h 窗口**——此前"跳过也消耗窗口"导致队列最长白等一天;
+    - 生产只看**工作时段**:默认凌晨 4:00 ~ 中午 12:00(work_start_hour/
+      work_end_hour 可配,支持跨零点);时段内随时可触发、跑完即可再触发
+      (频率由任务有无与 CPU 退让自然约束);
+    - boot(开机补跑)= 工作时段内开机即触发;时段外开机不动,等下个时段;
+    - CPU 退让在 pet 调用侧(这里只判时间)。
+    返回 (due: bool, why: str)。"""
     cfg = cfg if cfg is not None else _cfg()
     state = state if state is not None else _load()
     now = now if now is not None else time.time()
-    daily_hour = int(cfg.get("daily_hour", daily_hour))
-    window_s = int(cfg.get("production_window_s", PRODUCTION_WINDOW_S))
-    last = float(state.get("last_production_ts") or 0)
-    if last and now - last < window_s:
-        return False, f"滚动窗口内已生产（{int(now - last) // 3600}h 前）"
-    if boot:
-        return True, "开机补跑（24h 未生产）"
+    if _in_work_hours(now, cfg):
+        if boot:
+            return True, "工作时段开机补跑"
+        return True, "工作时段内"
     import datetime
-    if datetime.datetime.fromtimestamp(now).hour >= daily_hour:
-        return True, f"到达生产时刻（≥{daily_hour:02d}:00）"
-    return False, f"未到生产时刻（<{daily_hour:02d}:00）"
+    h = datetime.datetime.fromtimestamp(now).hour
+    start = int(cfg.get("work_start_hour", WORK_START_H))
+    end = int(cfg.get("work_end_hour", WORK_END_H))
+    return False, f"非工作时段（{start:02d}:00-{end:02d}:00 外，现在 {h:02d} 点）"
 
 
 def mark_production_run(state=None, now=None):

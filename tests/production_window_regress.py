@@ -93,7 +93,7 @@ def main():
             check(fw.threshold_bytes({"threshold_gb": 0.5}) == 5e8,
                   "阈值可配（0.5GB=5e8）")
 
-            # ---- production_due：双触发 × 滚动窗口 ----
+            # ---- production_due：工作时段规则(2026-10-28,窗口已移除) ----
             import datetime as _dt
 
             def _at(hour):        # 今天本地时刻 hour 点的 epoch
@@ -102,29 +102,67 @@ def main():
                     microsecond=0).timestamp()
 
             st = fw._load()
-            due, why = fw.production_due(
-                cfg={"daily_hour": 4}, state=st, now=_at(2), boot=True)
-            check(due and "开机补跑" in why,
-                  "开机补跑：02:00 无小时门，从未生产 → due")
-            due, _ = fw.production_due(
-                cfg={"daily_hour": 4}, state=st, now=_at(3), boot=False)
-            check(not due, "非开机：03:00 < 04:00 → 不 due")
-            due, why = fw.production_due(
-                cfg={"daily_hour": 4}, state=st, now=_at(5), boot=False)
-            check(due and "生产时刻" in why, "非开机：05:00 ≥ 04:00 → due")
+            CFG = {"work_start_hour": 4, "work_end_hour": 12}
+            due, why = fw.production_due(cfg=CFG, state=st,
+                                         now=_at(2), boot=True)
+            check(not due and "非工作时段" in why,
+                  "02:00 开机在时段外 → 不 due")
+            due, _ = fw.production_due(cfg=CFG, state=st,
+                                       now=_at(3), boot=False)
+            check(not due, "03:00 非开机在时段外 → 不 due")
+            due, why = fw.production_due(cfg=CFG, state=st,
+                                         now=_at(5), boot=False)
+            check(due and "工作时段" in why, "05:00 在时段内 → due")
+            due, why = fw.production_due(cfg=CFG, state=st,
+                                         now=_at(4), boot=True)
+            check(due and "开机补跑" in why, "04:00 边界(含头)开机 → due")
+            due, why = fw.production_due(cfg=CFG, state=st,
+                                         now=_at(12), boot=False)
+            check(not due, "12:00 边界(不含尾) → 不 due")
+            due, _ = fw.production_due(cfg=CFG, state=st,
+                                       now=_at(23), boot=True)
+            check(not due, "23:00 开机在时段外 → 不 due")
+            # 跨零点时段(22~6)
+            XN = {"work_start_hour": 22, "work_end_hour": 6}
+            check(fw.production_due(cfg=XN, state=st, now=_at(23))[0],
+                  "跨零点 22~6：23 点在时段内")
+            check(not fw.production_due(cfg=XN, state=st, now=_at(12))[0],
+                  "跨零点 22~6：12 点在时段外")
+            check(fw.production_due(cfg=XN, state=st, now=_at(3))[0],
+                  "跨零点 22~6：凌晨 3 点在时段内")
+            # 窗口已移除:刚生产完在时段内仍可再触发(不再锁 24h)
+            fw.mark_production_run(now=_at(5) - 600)
+            due, why = fw.production_due(cfg=CFG, state=fw._load(),
+                                         now=_at(5), boot=False)
+            check(due, "10 分钟前刚生产,时段内仍 due(滚动窗口已移除)")
+            # mark 只作展示记录:ts 落盘但不再阻塞判定
+            check(fw.last_production_ts() > 0, "mark 记录仍落盘(展示用)")
 
-            # 窗口内已生产 → 不 due（开机/到点都不再触发；锚定判定时刻）
-            fw.mark_production_run(now=_at(5) - 23 * H)
-            due, why = fw.production_due(
-                cfg={"daily_hour": 4}, state=fw._load(),
-                now=_at(5), boot=True)
-            check(not due and "窗口内已生产" in why,
-                  "判定前 23h 已生产 → 窗口内不重复触发（含开机）")
-            fw.mark_production_run(now=_at(5) - 25 * H)
-            due, _ = fw.production_due(
-                cfg={"daily_hour": 4}, state=fw._load(),
-                now=_at(5), boot=False)
-            check(due, "判定前 25h 已生产 → 窗口过期再 due")
+            # ---- CPU 采样与退让阈值口径(2026-10-28) ----
+            cpu = fw.cpu_percent(sample=0.3)
+            check(cpu is None or 0 <= cpu <= 100,
+                  f"CPU 采样可用或安全失败(实测 {cpu})")
+            import threading as _th
+            busy = {"on": False}
+            def _spin():
+                while busy["on"]:
+                    pass
+            busy["on"] = True
+            _th.Thread(target=_spin, daemon=True).start()
+            cpu2 = fw.cpu_percent(sample=0.5)
+            busy["on"] = False
+            check(cpu2 is None or cpu2 >= cpu if cpu is not None else True,
+                  f"满载采样不低于空闲({cpu}% -> {cpu2}%)")
+            # 阈值语义:cpu_yield_percent 在 rules 白名单 50~100
+            from toolbox import rules_sync as rs
+            check(rs._clamp("cpu_yield_percent", 30) == 50.0
+                  and rs._clamp("cpu_yield_percent", 95) == 95.0,
+                  "cpu_yield 夹紧 50~100(过低误退让被拒)")
+            check(rs.parse({"cpu_yield_percent": 99, "work_start_hour": 4,
+                            "work_end_hour": 12})
+                  == {"cpu_yield_percent": 99.0, "work_start_hour": 4,
+                      "work_end_hour": 12},
+                  "新键经规则通道可下发")
 
             # ---- 持久化往返 ----
             ts = now - 1234

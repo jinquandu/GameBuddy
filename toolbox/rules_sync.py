@@ -37,11 +37,16 @@ POLL_S = 6 * 3600          # 定时对齐周期(首启 30s 后先拉一次)
 SPEC = {
     "threshold_gb": (float, 0.05, 100.0),        # 生产阈值(GB)
     "scan_interval_min": (int, 10, 1440),        # 扫描节拍(分钟)
-    "daily_hour": (int, 0, 23),                  # 生产时刻(时)
+    "daily_hour": (int, 0, 23),                  # 生产时刻(时,兼容保留)
     "stable_min": (int, 1, 240),                 # 判稳分钟数
-    "production_window_s": (int, 3600, 7 * 86400),  # 滚动生产窗口
+    "production_window_s": (int, 3600, 7 * 86400),  # 滚动窗口(兼容保留;
+                                                  # 2026-10-28 起不再使用)
     "attempts_max": (int, 1, 10),                # 任务重试上限
     "lease_min": (int, 5, 1440),                 # 崩溃租约回收(分钟)
+    "work_start_hour": (int, 0, 23),             # 生产工作时段起(时,
+                                                  # 2026-10-28 新规则)
+    "work_end_hour": (int, 0, 23),               # 生产工作时段止(时,不含)
+    "cpu_yield_percent": (float, 50.0, 100.0),   # CPU 高于该值生产退让
 }
 
 

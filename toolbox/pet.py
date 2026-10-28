@@ -1856,10 +1856,13 @@ class PetWindow(tk.Tk):
         cfg = load_config().get("folder_watch") or {}
         hour = int(cfg.get("daily_hour", 4))
         scan_min = int(cfg.get("scan_interval_min", 120))
-        LOG.info("后台日任务就绪（每 %d 分钟扫描入队；生产=每日 %02d:00 "
-                 "或开机补跑，滚动 24h 一次，待处理录像>%.0fGB 触发"
-                 "（没处理过的都算）；未配置目录则等待选择）",
-                 scan_min, hour, float(cfg.get("threshold_gb", 2)))
+        LOG.info("后台日任务就绪（每 %d 分钟扫描入队；生产=工作时段 "
+                 "%02d:00-%02d:00（CPU>%.0f%% 退让），待处理录像>%.0fGB "
+                 "触发（没处理过的都算）；未配置目录则等待选择）",
+                 scan_min, int(cfg.get("work_start_hour", 4)),
+                 int(cfg.get("work_end_hour", 12)),
+                 float(cfg.get("cpu_yield_percent", 90)),
+                 float(cfg.get("threshold_gb", 2)))
         boot = {"done": False}
         next_scan = 0.0
         while not self.daily_stop.is_set():
@@ -1887,6 +1890,19 @@ class PetWindow(tk.Tk):
                 due, why = fw.production_due(hour, boot=not boot["done"])
                 if due:
                     boot["done"] = True
+                    # CPU 退让(2026-10-28 用户指示:计算资源 >90% 自动退让):
+                    # 整机占用高于阈值就不开工,10 分钟后再试。采样失败
+                    # (读不到 CPU)不拦——退让是体验优化,不是安全门。
+                    try:
+                        _cpu = fw.cpu_percent(sample=1.0)
+                    except Exception:              # noqa: BLE001
+                        _cpu = None
+                    _ylim = float(fw._cfg().get("cpu_yield_percent", 90))
+                    if _cpu is not None and _cpu > _ylim:
+                        LOG.info("生产退让：CPU %.0f%% > %.0f%%（机器忙）,"
+                                 "10 分钟后复查", _cpu, _ylim)
+                        self.daily_stop.wait(timeout=600)
+                        continue
                     gate = self._bind_gate()
                     if gate:
                         LOG.warning("生产暂缓：%s", gate)
