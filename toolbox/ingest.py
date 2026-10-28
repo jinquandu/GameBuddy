@@ -13,26 +13,42 @@ from pathlib import Path
 from toolbox.config import INDEX_FILE, RECORDINGS, ensure_dirs
 
 
-def probe_video(path):
-    """ffprobe 读取时长与分辨率，返回 dict；失败抛 RuntimeError。"""
+def probe_video(path, attempts=2):
+    """ffprobe 读取时长与分辨率，返回 dict；失败抛 RuntimeError。
+
+    空输出/非零退出/坏 JSON 均重试一次再报错（2026-10-28 客户机曾遇
+    ffprobe stdout 未被捕获，json.loads(None) 裸 TypeError 打断环境检测
+    第 6 步——疑似安全软件干扰子进程管道，重试 + 可读报错兜底）。"""
+    from toolbox import proc
     cmd = [
         "ffprobe", "-v", "error", "-print_format", "json",
         "-show_format", "-show_streams", str(path),
     ]
-    from toolbox import proc
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       creationflags=proc.NO_WINDOW)
-    if r.returncode != 0:
-        raise RuntimeError(f"ffprobe 失败: {path}\n{r.stderr.strip()[:300]}")
-    info = json.loads(r.stdout)
-    video = next((s for s in info.get("streams", [])
-                  if s.get("codec_type") == "video"), {})
-    fmt = info.get("format", {})
-    return {
-        "duration_sec": round(float(fmt.get("duration", 0)), 1),
-        "width": video.get("width"),
-        "height": video.get("height"),
-    }
+    err = ""
+    for _ in range(max(1, attempts)):
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           creationflags=proc.NO_WINDOW)
+        out, errtxt = (r.stdout or "").strip(), (r.stderr or "").strip()
+        if r.returncode != 0:
+            err = f"退出码 {r.returncode}：{errtxt[:300] or '无输出'}"
+            continue
+        if not out:
+            err = "无标准输出（若反复出现，请将本程序加入安全软件白名单后重试）"
+            continue
+        try:
+            info = json.loads(out)
+        except ValueError as e:
+            err = f"输出不是有效 JSON：{str(e)[:120]}"
+            continue
+        video = next((s for s in info.get("streams", [])
+                      if s.get("codec_type") == "video"), {})
+        fmt = info.get("format", {})
+        return {
+            "duration_sec": round(float(fmt.get("duration", 0)), 1),
+            "width": video.get("width"),
+            "height": video.get("height"),
+        }
+    raise RuntimeError(f"ffprobe 失败: {path}\n{err}")
 
 
 def load_index():

@@ -39,9 +39,10 @@ def _stub_io(ok_material=True, disk_free=100.0, write=200.0,
         "bench_decode": lambda p: {"media_sec": 90, "secs": 90 * decode_ratio,
                                    "ratio": decode_ratio,
                                    "x_realtime": round(1 / decode_ratio, 1)},
-        "bench_ocr": lambda p: {"frames": frames, "width": 1280,
-                                "height": 720, "ocr_ms": ocr_ms,
-                                "texts": 12, "samples_ms": [ocr_ms] * 5},
+        "bench_ocr": lambda p, size=None: {"frames": frames, "width": 1280,
+                                          "height": 720, "ocr_ms": ocr_ms,
+                                          "texts": 12,
+                                          "samples_ms": [ocr_ms] * 5},
     }
 
 

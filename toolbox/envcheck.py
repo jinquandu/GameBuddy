@@ -28,6 +28,7 @@ import statistics
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 from pathlib import Path
 
@@ -43,6 +44,7 @@ LOG = _getlog("envcheck")
 # demo 示例),直链在 eval clients 公共分发位,Range 可续传。
 DEMO_URL = "http://8.153.157.239/eval/clients/dashijie-tutorial-demo-input.mp4"
 DEMO_SHA256 = "c10df0870c7e3489392d4a2c0ab9b3a55f6debb028be900ceab26177982e7e3e"
+DEMO_W, DEMO_H = 1280, 720   # 素材实际尺寸(SHA 锁定即常量,第 6 步免 ffprobe)
 LEGACY_MATERIAL = DATA / "tutorial" / "demo-input.mp4"   # 旧教程缓存(迁移用)
 
 CHECK_DIR = DATA / "envcheck"
@@ -285,10 +287,16 @@ def bench_decode(path, media_sec=BENCH_DECODE_SEC, timeout=180):
             "x_realtime": round(media_sec / dt, 1) if dt > 0 else 0.0}
 
 
-def _extract_frames(path, n=BENCH_OCR_FRAMES, start=30, timeout=120):
-    """从素材抽 n 帧 BGR 原始帧(1fps),返回 (frames, w, h)。"""
-    info = probe_media(path)
-    w, h = int(info["width"]), int(info["height"])
+def _extract_frames(path, n=BENCH_OCR_FRAMES, start=30, timeout=120, size=None):
+    """从素材抽 n 帧 BGR 原始帧(1fps)，返回 (frames, w, h)。
+
+    size=(w,h) 为已知尺寸时跳过 ffprobe 预探测——2026-10-28 客户机
+    probe 输出被安全软件吞掉导致第 6 步全灭；素材 SHA 锁定，尺寸即常量。"""
+    if size:
+        w, h = int(size[0]), int(size[1])
+    else:
+        info = probe_media(path)
+        w, h = int(info["width"]), int(info["height"])
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(start),
            "-t", str(n), "-i", str(path), "-an", "-vf", "fps=1",
            "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
@@ -307,12 +315,13 @@ def _extract_frames(path, n=BENCH_OCR_FRAMES, start=30, timeout=120):
     return frames, w, h
 
 
-def bench_ocr(path, n=BENCH_OCR_FRAMES, timeout=120):
+def bench_ocr(path, n=BENCH_OCR_FRAMES, timeout=120, size=None):
     """真实跑 RapidOCR:与识别链同口径——只 OCR 信息带 SCAN_BAND(画面中央
-    窄条),不是全帧;首帧热身不计时,其余取中位耗时。"""
+    窄条),不是全帧;首帧热身不计时,其余取中位耗时。size=(w,h) 已知尺寸
+    时透传 _extract_frames 免 ffprobe。"""
     import cv2  # noqa: F401  确保 cv2 先于 onnxruntime 加载(冻结包 DLL 顺序)
     from toolbox.detector import SCAN_BAND, _get_ocr
-    frames, w, h = _extract_frames(path, n=n, timeout=timeout)
+    frames, w, h = _extract_frames(path, n=n, timeout=timeout, size=size)
     ocr = _get_ocr()
     h, w = frames.shape[1], frames.shape[2]
     x0, y0, x1, y1 = SCAN_BAND
@@ -547,6 +556,7 @@ def run(progress=None, watch_dir=None, io=None, user_id=""):
             bench.update(decode)
         except Exception as e:                 # noqa: BLE001
             level, detail = "bad", f"视频解码失败：{str(e)[:120]}"
+            LOG.warning("视频解码失败:\n%s", traceback.format_exc()[:2000])
     else:
         level, detail = "warn", "素材未就绪，未能实测解码速度"
     items.append(_item("decode", "视频解码", level, detail))
@@ -556,12 +566,14 @@ def run(progress=None, watch_dir=None, io=None, user_id=""):
     est = None
     if okm:
         try:
-            ocr = (ext.get("bench_ocr") or bench_ocr)(path)
+            ocr = (ext.get("bench_ocr") or bench_ocr)(path,
+                                                      size=(DEMO_W, DEMO_H))
             bench.update(ocr)
             est = _estimate_min_30(ocr, decode, info.get("cpu"))
             level, detail = _ocr_verdict(ocr, est)
         except Exception as e:                 # noqa: BLE001
             level, detail = "bad", f"画面识别失败：{str(e)[:120]}"
+            LOG.warning("画面识别失败:\n%s", traceback.format_exc()[:2000])
     else:
         level, detail = "warn", "素材未就绪，未能实测画面识别速度"
     items.append(_item("ocr", "画面识别", level, detail))
