@@ -34,6 +34,7 @@ _LINE = re.compile(
     r'"(?P<method>[A-Z]+) (?P<path>\S+)[^"]*" (?P<status>\d{3})')
 _BUILD = re.compile(r"[?&]build=(?P<build>[A-Za-z0-9._-]{1,32})")
 _OS = re.compile(r"[?&]os=(?P<os>[A-Za-z]{2,10})")
+_INSTALL = re.compile(r"[?&]install=(?P<install>[A-Za-z0-9]{8,64})")
 _MONTHS = {m: i + 1 for i, m in enumerate(
     ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))}
@@ -50,9 +51,11 @@ def _day(time_str):
 
 
 def parse(lines):
-    """-> {(day, build): {ips}} / {(day, build): count}。"""
+    """-> per{(day,build):{ips}}, os_per{(day,os):{ips}}, inst_per{(day,build):{ids}},
+    total, bad。install 为安装信标的随机 ID(唯一安装数,不受 NAT 合并)。"""
     per = defaultdict(set)
     os_per = defaultdict(set)
+    inst_per = defaultdict(set)
     total = 0
     bad = 0
     for line in lines:
@@ -72,10 +75,13 @@ def parse(lines):
         om = _OS.search(path)
         if om:
             os_per[(day, om.group("os"))].add(ip)
-    return per, os_per, total, bad
+        im = _INSTALL.search(path)
+        if im:
+            inst_per[(day, build)].add(im.group("install"))
+    return per, os_per, inst_per, total, bad
 
 
-def report(per, os_per, days=None, top_n=20):
+def report(per, os_per, inst_per=None, days=None, top_n=20):
     """生成可读报表(dict,便于 JSON 输出或打印)。"""
     by_day = defaultdict(set)
     by_build = defaultdict(set)
@@ -104,8 +110,26 @@ def report(per, os_per, days=None, top_n=20):
     platforms = sorted(({"os": o, "active_ips": len(ips)}
                         for o, ips in by_os.items()),
                        key=lambda x: -x["active_ips"])
-    return {"daily": daily, "builds": builds, "platforms": platforms,
-            "unknown_build_ips": sum(1 for _ in [])}
+    out = {"daily": daily, "builds": builds, "platforms": platforms}
+    if inst_per:
+        all_ids = set()
+        for ids in inst_per.values():
+            all_ids |= ids
+        by_day_inst = defaultdict(set)
+        by_build_inst = defaultdict(set)
+        for (day, build), ids in inst_per.items():
+            by_day_inst[day] |= ids
+            by_build_inst[build] |= ids
+        out["installs"] = {
+            "total_unique": len(all_ids),
+            "daily": [{"date": d, "installs": len(v)}
+                      for d, v in sorted(by_day_inst.items())],
+            "by_build": sorted(
+                ({"build": b, "installs": len(v)}
+                 for b, v in by_build_inst.items()),
+                key=lambda x: -x["installs"]),
+        }
+    return out
 
 
 def main(argv=None):
@@ -121,12 +145,12 @@ def main(argv=None):
         print(f"日志不存在: {p}", file=sys.stderr)
         return 2
     with p.open("r", encoding="utf-8", errors="replace") as f:
-        per, os_per, total, bad = parse(f)
+        per, os_per, inst_per, total, bad = parse(f)
     if not total:
         print("日志里没有 /eval/clients/ 请求——确认该 location 已开 access_log")
         return 1
 
-    rep = report(per, os_per, days=a.days or None)
+    rep = report(per, os_per, inst_per, days=a.days or None)
     print("=" * 58)
     print("陪玩大师姐 · 客户端活跃与 build 分布")
     print("=" * 58)
@@ -139,12 +163,24 @@ def main(argv=None):
     for row in rep["builds"]:
         tag = "（老客户端/未带参数）" if row["build"] == "unknown" else ""
         print(f"  {row['build']:<18} {row['active_ips']:>4} {tag}")
+    inst = rep.get("installs") or {}
+    if inst.get("total_unique"):
+        print("""
+唯一安装数（install_id 去重，不受 NAT 合并）""")
+        print(f"  累计 {inst['total_unique']}")
+        for row in inst.get("by_build", [])[:10]:
+            print(f"  {row['build']:<18} {row['installs']:>4}")
+        if inst.get("daily"):
+            print("  按日：")
+            for row in inst["daily"][-7:]:
+                print(f"    {row['date']}  {row['installs']:>4}")
     if rep["platforms"]:
         print("\n平台")
         for row in rep["platforms"]:
             print(f"  {row['os']:<6} {row['active_ips']:>4}")
-    print("\n口径提醒：IP ≠ 设备（同 NAT 会合并）；只统计联网且运行中的"
-          "客户端；累计安装量需登录上报（REQ 方案 B）。")
+    print("\n口径提醒：IP 统计会被 NAT 合并，仅供趋势参考；"
+          "唯一安装数按 install_id 去重（每台机器首启生成，与身份无关）；"
+          "只统计联网且运行中的客户端（装了不用不出现）。")
     if a.json:
         Path(a.json).write_text(json.dumps(rep, ensure_ascii=False, indent=2),
                                 encoding="utf-8")

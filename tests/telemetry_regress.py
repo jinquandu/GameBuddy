@@ -80,10 +80,67 @@ lines = [
     ' HTTP/1.1" 200 100 "-" "x"',
     'garbage line',
 ]
-per, os_per, total, bad = cs.parse(lines)
+lines_beat = [
+    '1.2.3.4 - - [28/Oct/2026:09:00:01 +0800] "GET /eval/clients/beat.json'
+    '?build=20261028-r17&v=0.1&os=win&install=AAAABBBBCCCC1111 HTTP/1.1" 200 77 "-" "x"',
+    '1.2.3.4 - - [28/Oct/2026:15:00:01 +0800] "GET /eval/clients/beat.json'
+    '?build=20261028-r17&v=0.1&os=win&install=AAAABBBBCCCC1111 HTTP/1.1" 200 77 "-" "x"',
+    '5.6.7.8 - - [28/Oct/2026:10:00:01 +0800] "GET /eval/clients/beat.json'
+    '?build=20261026-r9c&v=0.1&os=win&install=DDDDEEEEFFFF2222 HTTP/1.1" 200 77 "-" "x"',
+]
+per_b, os_b, inst_b, tot_b, bad_b = cs.parse(lines_beat)
+rep_b = cs.report(per_b, os_b, inst_b)
+check(tot_b == 3, "信标:三行解析")
+check(rep_b["installs"]["total_unique"] == 2,
+      "信标:install_id 去重 → 2 台(同机重复上报不重复计)")
+bb = {r["build"]: r["installs"] for r in rep_b["installs"]["by_build"]}
+check(bb.get("20261028-r17") == 1 and bb.get("20261026-r9c") == 1,
+      f"信标:按 build 的安装数({bb})")
+check(rep_b["installs"]["daily"][0]["installs"] == 2, "信标:按日安装数")
+
+i1 = tm.install_id()
+check(len(i1) == 32 and i1.isalnum(), "install_id:32 位十六进制")
+check(tm.install_id() == i1, "install_id:进程内稳定")
+import tempfile as _tf
+from pathlib import Path as _P
+import toolbox.config as _cfg
+with _tf.TemporaryDirectory() as td:
+    real_data = _cfg.DATA
+    real_cached = tm._install_cache["id"]
+    _cfg.DATA = _P(td)
+    tm._install_cache["id"] = None
+    try:
+        a = tm.install_id()
+        f = _P(td) / ".device" / "install_id"
+        check(f.is_file() and f.read_text(encoding="utf-8").strip() == a,
+              "install_id:首启落盘")
+        tm._install_cache["id"] = None          # 模拟重启
+        check(tm.install_id() == a, "install_id:重启复用同一值")
+    finally:
+        _cfg.DATA = real_data
+        tm._install_cache["id"] = real_cached
+
+seen = []
+def _fake_open(url, timeout):
+    seen.append(url)
+    class _R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return b"x"
+    return _R()
+check(tm.send_beat(_open=_fake_open) is True, "信标:发送成功")
+check(bool(seen) and "install=" in seen[0] and "build=" in seen[0]
+      and "os=" in seen[0], "信标:URL 带 install/build/os")
+
+
+def _boom(url, timeout):
+    raise OSError("net down")
+check(tm.send_beat(_open=_boom) is False, "信标:网络失败静默返回 False")
+
+per, os_per, inst, total, bad = cs.parse(lines)
 check(total == 5, f"脚本:只计 clients 路径(实得 {total})")
 check(bad == 1, "脚本:坏行可容错")
-rep = cs.report(per, os_per)
+rep = cs.report(per, os_per, inst)
 daily = {r["date"]: r["active_ips"] for r in rep["daily"]}
 check(daily.get("2026-10-28") == 3, f"脚本:28 日唯一 IP=3（实得 {daily}）")
 check(daily.get("2026-10-27") == 1, "脚本:27 日唯一 IP=1（跨日分隔）")

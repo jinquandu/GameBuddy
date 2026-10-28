@@ -359,6 +359,7 @@ class PetWindow(tk.Tk):
         self._upd_info = {}               # 清单摘要(版本/说明/required)
         self._update_restore_ready()      # 上次已就绪的重启后仍可应用
         self._update_start()              # 自动更新(REQ-20261026-002)
+        self._beat_start()                # 安装信标(REQ-20261028-002 方案B)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(15_000, self._queue_tick)
         self.after(2500, self._dev_snapshot)
@@ -1677,6 +1678,27 @@ class PetWindow(tk.Tk):
     # 校验+staged→「新版本已就绪」。**绝不自动重启**:重启入口只在用户
     # 点「重启并更新」时出现;剪辑/上传进行中既不下载也不催促。
     # 清单必须过 Ed25519 验签(update_signing),失败沿用当前版本留痕。
+
+    def _beat_start(self):
+        """安装信标(REQ-20261028-002 方案 B):启动 20s 后发一次,之后每 24h。
+        **不依赖账号服务**——只向服务端静态分发位发 GET(带随机 install_id、
+        build、os),服务端 nginx 日志按 install_id 去重即得精确安装数。
+        fire-and-forget:失败静默、不重试、不弹窗。"""
+        def loop():
+            import toolbox.telemetry as tm
+            if self.daily_stop.wait(20):
+                return
+            try:
+                tm.send_beat()
+            except Exception:                  # noqa: BLE001 统计失败无感
+                pass
+            while not self.daily_stop.wait(tm.BEAT_INTERVAL_S):
+                try:
+                    tm.send_beat()
+                except Exception:              # noqa: BLE001
+                    pass
+        threading.Thread(target=loop, daemon=True,
+                         name="install-beat").start()
 
     UPDATE_POLL_S = 6 * 3600
 
