@@ -72,6 +72,13 @@ def rules_urls():
         out.append(origin + DEFAULT_URL_PATH)
     if IP_FALLBACK + DEFAULT_URL_PATH not in out:
         out.append(IP_FALLBACK + DEFAULT_URL_PATH)
+    # 统计参数(REQ-20261028-002):服务端 access_log 据此聚合日活与 build 分布;
+    # 静态 alias 会忽略 query,响应不变。拼装失败退回原 URL(统计不能影响功能)
+    try:
+        from toolbox.telemetry import with_query
+        out = [with_query(u) for u in out]
+    except Exception:                          # noqa: BLE001
+        pass
     return out
 
 

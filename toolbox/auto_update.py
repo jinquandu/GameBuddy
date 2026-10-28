@@ -99,6 +99,12 @@ def manifest_urls():
     fb = IP_FALLBACK + MANIFEST_PATH
     if fb not in out:
         out.append(fb)
+    # 统计参数(REQ-20261028-002):同 rules_sync,仅用于服务端 access_log
+    try:
+        from toolbox.telemetry import with_query
+        out = [with_query(u) for u in out]
+    except Exception:                          # noqa: BLE001
+        pass
     return out
 
 

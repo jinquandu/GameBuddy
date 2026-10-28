@@ -89,13 +89,24 @@ def main():
             j3 = fw.claim_next()
             check(fw._load()["jobs"][j3["key"]]["state"] == "running",
                   "再次领取最早 queued 任务")
-            stx = fw._load()
-            stx["jobs"][j3["key"]]["taken_ts"] = time.time() - 999 * 60
-            fw._save(stx)
-            fw.expire_leases()
+            # attempts 上限读配置(2026-10-27 由 3 调 5,测试不再硬编码)
+            _amax = int(fw._cfg().get("attempts_max", 5))
+            for _ in range(_amax + 2):        # 反复"领取→崩溃→回收"直到超限
+                stx = fw._load()
+                cur = stx["jobs"][j3["key"]]
+                if cur["state"] == "queued":   # 被回收后重新领取(新"进程")
+                    fw.claim_next()
+                    stx = fw._load()
+                    cur = stx["jobs"][j3["key"]]
+                if cur["state"] != "running":
+                    break
+                cur["taken_ts"] = time.time() - 999 * 60
+                fw._save(stx)
+                fw.expire_leases()
             stx = fw._load()["jobs"][j3["key"]]
-            check(stx["state"] == "failed" and stx["attempts"] >= 3,
-                  f"租约超时+attempts 达上限 → failed（第{stx['attempts']}次）")
+            check(stx["state"] == "failed" and stx["attempts"] >= _amax,
+                  f"租约超时+attempts 达上限({_amax}) → failed"
+                  f"（第{stx['attempts']}次）")
 
             # 5) process_pending 假 runner 全流程（新"进程"=重读持久状态）
             fake_calls = []
